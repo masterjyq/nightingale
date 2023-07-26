@@ -8,6 +8,7 @@ import (
 	"github.com/ccfos/nightingale/v6/alert/astats"
 	"github.com/ccfos/nightingale/v6/alert/process"
 	"github.com/ccfos/nightingale/v6/conf"
+	"github.com/ccfos/nightingale/v6/dumper"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/httpx"
@@ -49,17 +50,20 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 		alertMuteCache := memsto.NewAlertMuteCache(ctx, syncStats)
 		alertRuleCache := memsto.NewAlertRuleCache(ctx, syncStats)
 		notifyConfigCache := memsto.NewNotifyConfigCache(ctx)
+		userCache := memsto.NewUserCache(ctx, syncStats)
+		userGroupCache := memsto.NewUserGroupCache(ctx, syncStats)
 
 		promClients := prom.NewPromClient(ctx, config.Alert.Heartbeat)
 		externalProcessors := process.NewExternalProcessors()
 
-		alert.Start(config.Alert, config.Pushgw, syncStats, alertStats, externalProcessors, targetCache, busiGroupCache, alertMuteCache, alertRuleCache, notifyConfigCache, dsCache, ctx, promClients)
+		alert.Start(config.Alert, config.Pushgw, syncStats, alertStats, externalProcessors, targetCache, busiGroupCache, alertMuteCache, alertRuleCache, notifyConfigCache, dsCache, ctx, promClients, userCache, userGroupCache)
 
 		alertrtRouter := alertrt.New(config.HTTP, config.Alert, alertMuteCache, targetCache, busiGroupCache, alertStats, ctx, externalProcessors)
 
 		alertrtRouter.Config(r)
 	}
 
+	dumper.ConfigRouter(r)
 	httpClean := httpx.Init(config.HTTP, r)
 
 	return func() {
