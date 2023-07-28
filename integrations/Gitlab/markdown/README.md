@@ -96,32 +96,20 @@ url_label_value = "{{.Host}}"
 labels = {service="gitlab",job="nginx"}
 ```
 
+Dashboards:   
+<img src="http://download.flashcat.cloud/uPic/MachinePerformance.png" alt="MachinePerformance" style="zoom:50%;" />
 
-Dashboards:
+NGINXVTS   
+<img src="http://download.flashcat.cloud/uPic/NGINXVTS.png" alt="NGINXVTS" style="zoom:50%;" />
 
-[MachinePerformance](../dashboards/MachinePerformance.json)
+Overview   
+<img src="http://download.flashcat.cloud/uPic/Overview.png" alt="Overview" style="zoom:50%;" />
 
-![MachinePerformance](./MachinePerformance.png)
+PostgreSQL   
+<img src="http://download.flashcat.cloud/uPic/PostgreSQL.png" alt="PostgreSQL" style="zoom:50%;" />
 
-[NGINXVTS](../dashboards/NGINXVTS.json)
+Redis
+<img src="http://download.flashcat.cloud/uPic/Redis.png" alt="Redis" style="zoom:50%;" />
 
-![NGINXVTS](./NGINXVTS.png)
-
-[Overview](../dashboards/Overview.json)
-
-![Overview](./Overview.png)
-
-[PostgreSQL](../dashboards/PostgreSQL.json)
-
-![PostgreSQL](./PostgreSQL.png)
-
-[Redis](../dashboards/Redis.json)
-
-![Redis](./Redis.png)
-
-
-Alerts:
-
-[alerts](../alerts/gitlab_by_categraf.json)
-
-![alert](./alerts.png)
+Alerts:   
+<img src="http://download.flashcat.cloud/uPic/alerts.png" alt="alert" style="zoom:50%;" />
