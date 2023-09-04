@@ -85,7 +85,8 @@ func (s *Scheduler) syncAlertRules() {
 		if rule == nil {
 			continue
 		}
-		if rule.IsPrometheusRule() {
+
+		if rule.IsPrometheusRule() || rule.IsLokiRule() {
 			datasourceIds := s.promClients.Hit(rule.DatasourceIdsJson)
 			for _, dsId := range datasourceIds {
 				if !naming.DatasourceHashRing.IsHit(dsId, fmt.Sprintf("%d", rule.Id), s.aconf.Heartbeat.Endpoint) {

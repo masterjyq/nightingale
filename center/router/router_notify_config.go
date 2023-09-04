@@ -2,15 +2,17 @@ package router
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/ccfos/nightingale/v6/alert/aconf"
 	"github.com/ccfos/nightingale/v6/alert/sender"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/models"
-	"github.com/pelletier/go-toml/v2"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/toolkits/pkg/ginx"
+	"github.com/toolkits/pkg/str"
 )
 
 func (rt *Router) webhookGets(c *gin.Context) {
@@ -178,16 +180,42 @@ func (rt *Router) notifyConfigPut(c *gin.Context) {
 
 	if f.Ckey == models.SMTP {
 		// 重置邮件发送器
-		var smtp aconf.SMTPConfig
-		err := toml.Unmarshal([]byte(f.Cval), &smtp)
-		ginx.Dangerous(err)
-
-		if smtp.Host == "" || smtp.Port == 0 {
-			ginx.Bomb(200, "smtp host or port can not be empty")
-		}
+		smtp := smtpValidate(f.Cval)
 
 		go sender.RestartEmailSender(smtp)
 	}
 
 	ginx.NewRender(c).Message(nil)
+}
+
+func smtpValidate(smtpStr string) aconf.SMTPConfig {
+	var smtp aconf.SMTPConfig
+	ginx.Dangerous(toml.Unmarshal([]byte(smtpStr), &smtp))
+
+	if smtp.Host == "" || smtp.Port == 0 {
+		ginx.Bomb(200, "smtp host or port can not be empty")
+	}
+	return smtp
+}
+
+type form struct {
+	models.Configs
+	Email string `json:"email"`
+}
+
+// After configuring the aconf.SMTPConfig, users can choose to perform a test. In this test, the function attempts to send an email
+func (rt *Router) attemptSendEmail(c *gin.Context) {
+	var f form
+	ginx.BindJSON(c, &f)
+
+	if f.Email = strings.TrimSpace(f.Email); f.Email == "" || !str.IsMail(f.Email) {
+		ginx.Bomb(200, "email(%s) invalid", f.Email)
+	}
+
+	if f.Ckey != models.SMTP {
+		ginx.Bomb(200, "config(%v) invalid", f)
+	}
+	smtp := smtpValidate(f.Cval)
+	ginx.NewRender(c).Message(sender.SendEmail("Email test", "email content", []string{f.Email}, smtp))
+
 }

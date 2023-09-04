@@ -43,6 +43,8 @@ func (pc *PromClientMap) loadFromDatabase() {
 	var err error
 	if !pc.ctx.IsCenter {
 		datasources, err = poster.GetByUrls[[]*models.Datasource](pc.ctx, "/v1/n9e/datasources?typ="+models.PROMETHEUS)
+		lokiDatasource, err := poster.GetByUrls[[]*models.Datasource](pc.ctx, "/v1/n9e/datasources?typ="+models.LOKI)
+		datasources = append(datasources, lokiDatasource...)
 		if err != nil {
 			logger.Errorf("failed to get datasources, error: %v", err)
 			return
@@ -52,6 +54,8 @@ func (pc *PromClientMap) loadFromDatabase() {
 		}
 	} else {
 		datasources, err = models.GetDatasourcesGetsBy(pc.ctx, models.PROMETHEUS, "", "", "")
+		lokiDatasource, err := models.GetDatasourcesGetsBy(pc.ctx, models.LOKI, "", "", "")
+		datasources = append(datasources, lokiDatasource...)
 		if err != nil {
 			logger.Errorf("failed to get datasources, error: %v", err)
 			return
@@ -87,6 +91,11 @@ func (pc *PromClientMap) loadFromDatabase() {
 			DialTimeout:         ds.HTTPJson.DialTimeout,
 			MaxIdleConnsPerHost: ds.HTTPJson.MaxIdleConnsPerHost,
 			Headers:             header,
+		}
+
+		if strings.HasPrefix(ds.HTTPJson.Url, "https") {
+			po.UseTLS = true
+			po.InsecureSkipVerify = ds.HTTPJson.TLS.SkipTlsVerify
 		}
 
 		if internalAddr != "" && !pc.ctx.IsCenter {
@@ -130,11 +139,13 @@ func (pc *PromClientMap) loadFromDatabase() {
 }
 
 func (pc *PromClientMap) newReaderClientFromPromOption(po PromOption) (api.Client, error) {
+	tlsConfig, _ := po.TLSConfig()
+
 	return api.NewClient(api.Config{
 		Address: po.Url,
 		RoundTripper: &http.Transport{
-			// TLSClientConfig: tlsConfig,
-			Proxy: http.ProxyFromEnvironment,
+			TLSClientConfig: tlsConfig,
+			Proxy:           http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout: time.Duration(po.DialTimeout) * time.Millisecond,
 			}).DialContext,
@@ -145,11 +156,13 @@ func (pc *PromClientMap) newReaderClientFromPromOption(po PromOption) (api.Clien
 }
 
 func (pc *PromClientMap) newWriterClientFromPromOption(po PromOption) (api.Client, error) {
+	tlsConfig, _ := po.TLSConfig()
+
 	return api.NewClient(api.Config{
 		Address: po.WriteAddr,
 		RoundTripper: &http.Transport{
-			// TLSClientConfig: tlsConfig,
-			Proxy: http.ProxyFromEnvironment,
+			TLSClientConfig: tlsConfig,
+			Proxy:           http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout: time.Duration(po.DialTimeout) * time.Millisecond,
 			}).DialContext,

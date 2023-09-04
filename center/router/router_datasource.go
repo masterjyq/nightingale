@@ -25,6 +25,11 @@ type listReq struct {
 }
 
 func (rt *Router) datasourceList(c *gin.Context) {
+	if rt.DatasourceCheckHook(c) {
+		Render(c, []int{}, nil)
+		return
+	}
+
 	var req listReq
 	ginx.BindJSON(c, &req)
 
@@ -65,6 +70,11 @@ func (rt *Router) datasourceBriefs(c *gin.Context) {
 }
 
 func (rt *Router) datasourceUpsert(c *gin.Context) {
+	if rt.DatasourceCheckHook(c) {
+		Render(c, []int{}, nil)
+		return
+	}
+
 	var req models.Datasource
 	ginx.BindJSON(c, &req)
 	username := Username(c)
@@ -127,14 +137,26 @@ func DatasourceCheck(ds models.Datasource) error {
 	if ds.PluginType == models.PROMETHEUS {
 		subPath := "/api/v1/query"
 		query := url.Values{}
-		if strings.Contains(fullURL, "loki") {
+		if ds.HTTPJson.IsLoki() {
 			subPath = "/api/v1/labels"
 		} else {
 			query.Add("query", "1+1")
 		}
 		fullURL = fmt.Sprintf("%s%s?%s", ds.HTTPJson.Url, subPath, query.Encode())
 
-		req, err = http.NewRequest("POST", fullURL, nil)
+		req, err = http.NewRequest("GET", fullURL, nil)
+		if err != nil {
+			logger.Errorf("Error creating request: %v", err)
+			return fmt.Errorf("request url:%s failed", fullURL)
+		}
+	}
+
+	if ds.PluginType == models.LOKI {
+		subPath := "/api/v1/labels"
+
+		fullURL = fmt.Sprintf("%s%s", ds.HTTPJson.Url, subPath)
+
+		req, err = http.NewRequest("GET", fullURL, nil)
 		if err != nil {
 			logger.Errorf("Error creating request: %v", err)
 			return fmt.Errorf("request url:%s failed", fullURL)
@@ -165,6 +187,11 @@ func DatasourceCheck(ds models.Datasource) error {
 }
 
 func (rt *Router) datasourceGet(c *gin.Context) {
+	if rt.DatasourceCheckHook(c) {
+		Render(c, []int{}, nil)
+		return
+	}
+
 	var req models.Datasource
 	ginx.BindJSON(c, &req)
 	err := req.Get(rt.Ctx)
@@ -172,6 +199,11 @@ func (rt *Router) datasourceGet(c *gin.Context) {
 }
 
 func (rt *Router) datasourceUpdataStatus(c *gin.Context) {
+	if rt.DatasourceCheckHook(c) {
+		Render(c, []int{}, nil)
+		return
+	}
+
 	var req models.Datasource
 	ginx.BindJSON(c, &req)
 	username := Username(c)
@@ -181,6 +213,11 @@ func (rt *Router) datasourceUpdataStatus(c *gin.Context) {
 }
 
 func (rt *Router) datasourceDel(c *gin.Context) {
+	if rt.DatasourceCheckHook(c) {
+		Render(c, []int{}, nil)
+		return
+	}
+
 	var ids []int64
 	ginx.BindJSON(c, &ids)
 	err := models.DatasourceDel(rt.Ctx, ids)
