@@ -230,7 +230,7 @@ func (rt *Router) loginCallback(c *gin.Context) {
 
 	ret, err := rt.Sso.OIDC.Callback(rt.Redis, c.Request.Context(), code, state)
 	if err != nil {
-		logger.Debugf("sso.callback() get ret %+v error %v", ret, err)
+		logger.Errorf("sso_callback fail. code:%s, state:%s, get ret: %+v. error: %v", code, state, ret, err)
 		ginx.NewRender(c).Data(CallbackOutput{}, err)
 		return
 	}
@@ -580,7 +580,7 @@ type RSAConfigOutput struct {
 
 func (rt *Router) rsaConfigGet(c *gin.Context) {
 	publicKey := ""
-	if rt.HTTP.RSA.OpenRSA {
+	if len(rt.HTTP.RSA.RSAPublicKey) > 0 {
 		publicKey = base64.StdEncoding.EncodeToString(rt.HTTP.RSA.RSAPublicKey)
 	}
 	ginx.NewRender(c).Data(RSAConfigOutput{
