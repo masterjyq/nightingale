@@ -17,6 +17,7 @@ import (
 
 const (
 	METRIC = "metric"
+	LOG    = "logging"
 	HOST   = "host"
 	LOKI   = "loki"
 
@@ -107,6 +108,7 @@ type HostTrigger struct {
 }
 
 type RuleQuery struct {
+	Inhibit  bool          `json:"inhibit"`
 	Queries  []interface{} `json:"queries"`
 	Triggers []Trigger     `json:"triggers"`
 }
@@ -161,8 +163,20 @@ func GetHostsQuery(queries []HostQuery) []map[string]interface{} {
 			}
 			if q.Op == "==" {
 				m["ident in (?)"] = lst
-			} else {
+			} else if q.Op == "!=" {
 				m["ident not in (?)"] = lst
+			} else if q.Op == "=~" {
+				blank := " "
+				for _, host := range lst {
+					m["ident like ?"+blank] = strings.ReplaceAll(host, "*", "%")
+					blank += " "
+				}
+			} else if q.Op == "!~" {
+				blank := " "
+				for _, host := range lst {
+					m["ident not like ?"+blank] = strings.ReplaceAll(host, "*", "%")
+					blank += " "
+				}
 			}
 		}
 		query = append(query, m)
@@ -663,6 +677,20 @@ func AlertRuleGets(ctx *ctx.Context, groupId int64) ([]AlertRule, error) {
 	return lst, err
 }
 
+func AlertRuleGetsByBGIds(ctx *ctx.Context, bgids []int64) ([]AlertRule, error) {
+	session := DB(ctx).Where("group_id in (?)", bgids).Order("name")
+
+	var lst []AlertRule
+	err := session.Find(&lst).Error
+	if err == nil {
+		for i := 0; i < len(lst); i++ {
+			lst[i].DB2FE()
+		}
+	}
+
+	return lst, err
+}
+
 func AlertRuleGetsAll(ctx *ctx.Context) ([]*AlertRule, error) {
 	if !ctx.IsCenter {
 		lst, err := poster.GetByUrls[[]*AlertRule](ctx, "/v1/n9e/alert-rules?disabled=0")
@@ -803,7 +831,7 @@ func (ar *AlertRule) IsTdengineRule() bool {
 }
 
 func (ar *AlertRule) GetRuleType() string {
-	if ar.Prod == METRIC {
+	if ar.Prod == METRIC || ar.Prod == LOG {
 		return ar.Cate
 	}
 
@@ -829,7 +857,6 @@ func (ar *AlertRule) UpdateEvent(event *AlertCurEvent) {
 	event.RuleProd = ar.Prod
 	event.RuleAlgo = ar.Algorithm
 	event.PromForDuration = ar.PromForDuration
-	event.PromQl = ar.PromQl
 	event.RuleConfig = ar.RuleConfig
 	event.RuleConfigJson = ar.RuleConfigJson
 	event.PromEvalInterval = ar.PromEvalInterval

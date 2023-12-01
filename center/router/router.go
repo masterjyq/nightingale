@@ -46,13 +46,9 @@ type Router struct {
 	UserCache         *memsto.UserCacheType
 	UserGroupCache    *memsto.UserGroupCacheType
 	Ctx               *ctx.Context
-
-	DatasourceCheckHook func(*gin.Context) bool
 }
 
-func New(httpConfig httpx.Config, center cconf.Center, operations cconf.Operation, ds *memsto.DatasourceCacheType, ncc *memsto.NotifyConfigCacheType,
-	pc *prom.PromClientMap, tdendgineClients *tdengine.TdengineClientMap, redis storage.Redis, sso *sso.SsoClient, ctx *ctx.Context, metaSet *metas.Set, idents *idents.Set, tc *memsto.TargetCacheType,
-	uc *memsto.UserCacheType, ugc *memsto.UserGroupCacheType) *Router {
+func New(httpConfig httpx.Config, center cconf.Center, operations cconf.Operation, ds *memsto.DatasourceCacheType, ncc *memsto.NotifyConfigCacheType, pc *prom.PromClientMap, tdendgineClients *tdengine.TdengineClientMap, redis storage.Redis, sso *sso.SsoClient, ctx *ctx.Context, metaSet *metas.Set, idents *idents.Set, tc *memsto.TargetCacheType, uc *memsto.UserCacheType, ugc *memsto.UserGroupCacheType) *Router {
 	return &Router{
 		HTTP:              httpConfig,
 		Center:            center,
@@ -69,8 +65,6 @@ func New(httpConfig httpx.Config, center cconf.Center, operations cconf.Operatio
 		UserCache:         uc,
 		UserGroupCache:    ugc,
 		Ctx:               ctx,
-
-		DatasourceCheckHook: func(ctx *gin.Context) bool { return false },
 	}
 }
 
@@ -177,12 +171,11 @@ func (rt *Router) Config(r *gin.Engine) {
 			pages.POST("/tdengine-tables", rt.tdengineTables)
 			pages.POST("/tdengine-columns", rt.tdengineColumns)
 
-			pages.GET("/sql-template", rt.QuerySqlTemplate)
 		} else {
 			pages.Any("/proxy/:id/*url", rt.auth(), rt.dsProxy)
 			pages.POST("/query-range-batch", rt.auth(), rt.promBatchQueryRange)
 			pages.POST("/query-instant-batch", rt.auth(), rt.promBatchQueryInstant)
-			pages.GET("/datasource/brief", rt.auth(), rt.datasourceBriefs)
+			pages.GET("/datasource/brief", rt.auth(), rt.user(), rt.datasourceBriefs)
 
 			pages.POST("/ds-query", rt.auth(), rt.QueryData)
 			pages.POST("/logs-query", rt.auth(), rt.QueryLog)
@@ -192,6 +185,7 @@ func (rt *Router) Config(r *gin.Engine) {
 			pages.POST("/tdengine-columns", rt.auth(), rt.tdengineColumns)
 		}
 
+		pages.GET("/sql-template", rt.QuerySqlTemplate)
 		pages.POST("/auth/login", rt.jwtMock(), rt.loginPost)
 		pages.POST("/auth/logout", rt.jwtMock(), rt.auth(), rt.logoutPost)
 		pages.POST("/auth/refresh", rt.jwtMock(), rt.refreshPost)
@@ -270,6 +264,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/integrations/icon/:cate/:name", rt.builtinIcon)
 		pages.GET("/integrations/makedown/:cate", rt.builtinMarkdown)
 
+		pages.GET("/busi-groups/boards", rt.auth(), rt.user(), rt.perm("/dashboards"), rt.boardGetsByGids)
 		pages.GET("/busi-group/:id/boards", rt.auth(), rt.user(), rt.perm("/dashboards"), rt.bgro(), rt.boardGets)
 		pages.POST("/busi-group/:id/boards", rt.auth(), rt.user(), rt.perm("/dashboards/add"), rt.bgrw(), rt.boardAdd)
 		pages.POST("/busi-group/:id/board/:bid/clone", rt.auth(), rt.user(), rt.perm("/dashboards/add"), rt.bgrw(), rt.boardClone)
@@ -287,6 +282,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/alert-rules/builtin/alerts-cates", rt.auth(), rt.user(), rt.builtinAlertCateGets)
 		pages.GET("/alert-rules/builtin/list", rt.auth(), rt.user(), rt.builtinAlertRules)
 
+		pages.GET("/busi-groups/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGetsByGids)
 		pages.GET("/busi-group/:id/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGets)
 		pages.POST("/busi-group/:id/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.alertRuleAddByFE)
 		pages.POST("/busi-group/:id/alert-rules/import", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.alertRuleAddByImport)
@@ -296,6 +292,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/alert-rule/:arid", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGet)
 		pages.PUT("/busi-group/alert-rule/validate", rt.auth(), rt.user(), rt.perm("/alert-rules/put"), rt.alertRuleValidation)
 
+		pages.GET("/busi-groups/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGetsByGids)
 		pages.GET("/busi-group/:id/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGets)
 		pages.POST("/busi-group/:id/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules/add"), rt.bgrw(), rt.recordingRuleAddByFE)
 		pages.DELETE("/busi-group/:id/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules/del"), rt.bgrw(), rt.recordingRuleDel)
@@ -303,6 +300,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/recording-rule/:rrid", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGet)
 		pages.PUT("/busi-group/:id/recording-rules/fields", rt.auth(), rt.user(), rt.perm("/recording-rules/put"), rt.recordingRulePutFields)
 
+		pages.GET("/busi-groups/alert-mutes", rt.auth(), rt.user(), rt.perm("/alert-mutes"), rt.alertMuteGetsByGids)
 		pages.GET("/busi-group/:id/alert-mutes", rt.auth(), rt.user(), rt.perm("/alert-mutes"), rt.bgro(), rt.alertMuteGetsByBG)
 		pages.POST("/busi-group/:id/alert-mutes/preview", rt.auth(), rt.user(), rt.perm("/alert-mutes/add"), rt.bgrw(), rt.alertMutePreview)
 		pages.POST("/busi-group/:id/alert-mutes", rt.auth(), rt.user(), rt.perm("/alert-mutes/add"), rt.bgrw(), rt.alertMuteAdd)
@@ -310,6 +308,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/busi-group/:id/alert-mute/:amid", rt.auth(), rt.user(), rt.perm("/alert-mutes/put"), rt.alertMutePutByFE)
 		pages.PUT("/busi-group/:id/alert-mutes/fields", rt.auth(), rt.user(), rt.perm("/alert-mutes/put"), rt.bgrw(), rt.alertMutePutFields)
 
+		pages.GET("/busi-groups/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes"), rt.alertSubscribeGetsByGids)
 		pages.GET("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes"), rt.bgro(), rt.alertSubscribeGets)
 		pages.GET("/alert-subscribe/:sid", rt.auth(), rt.user(), rt.perm("/alert-subscribes"), rt.alertSubscribeGet)
 		pages.POST("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes/add"), rt.bgrw(), rt.alertSubscribeAdd)
@@ -337,6 +336,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.POST("/alert-aggr-views", rt.auth(), rt.user(), rt.alertAggrViewAdd)
 		pages.PUT("/alert-aggr-views", rt.auth(), rt.user(), rt.alertAggrViewPut)
 
+		pages.GET("/busi-groups/task-tpls", rt.auth(), rt.user(), rt.perm("/job-tpls"), rt.taskTplGetsByGids)
 		pages.GET("/busi-group/:id/task-tpls", rt.auth(), rt.user(), rt.perm("/job-tpls"), rt.bgro(), rt.taskTplGets)
 		pages.POST("/busi-group/:id/task-tpls", rt.auth(), rt.user(), rt.perm("/job-tpls/add"), rt.bgrw(), rt.taskTplAdd)
 		pages.DELETE("/busi-group/:id/task-tpl/:tid", rt.auth(), rt.user(), rt.perm("/job-tpls/del"), rt.bgrw(), rt.taskTplDel)
@@ -345,6 +345,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/busi-group/:id/task-tpl/:tid", rt.auth(), rt.user(), rt.perm("/job-tpls"), rt.bgro(), rt.taskTplGet)
 		pages.PUT("/busi-group/:id/task-tpl/:tid", rt.auth(), rt.user(), rt.perm("/job-tpls/put"), rt.bgrw(), rt.taskTplPut)
 
+		pages.GET("/busi-groups/tasks", rt.auth(), rt.user(), rt.perm("/job-tasks"), rt.taskGetsByGids)
 		pages.GET("/busi-group/:id/tasks", rt.auth(), rt.user(), rt.perm("/job-tasks"), rt.bgro(), rt.taskGets)
 		pages.POST("/busi-group/:id/tasks", rt.auth(), rt.user(), rt.perm("/job-tasks/add"), rt.bgrw(), rt.taskAdd)
 		pages.GET("/busi-group/:id/task/*url", rt.auth(), rt.user(), rt.perm("/job-tasks"), rt.taskProxy)
@@ -353,7 +354,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/servers", rt.auth(), rt.admin(), rt.serversGet)
 		pages.GET("/server-clusters", rt.auth(), rt.admin(), rt.serverClustersGet)
 
-		pages.POST("/datasource/list", rt.auth(), rt.datasourceList)
+		pages.POST("/datasource/list", rt.auth(), rt.user(), rt.datasourceList)
 		pages.POST("/datasource/plugin/list", rt.auth(), rt.pluginList)
 		pages.POST("/datasource/upsert", rt.auth(), rt.admin(), rt.datasourceUpsert)
 		pages.POST("/datasource/desc", rt.auth(), rt.admin(), rt.datasourceGet)
@@ -369,7 +370,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/role/:id/ops", rt.auth(), rt.admin(), rt.roleBindOperation)
 		pages.GET("/operation", rt.operations)
 
-		pages.GET("/notify-tpls", rt.auth(), rt.admin(), rt.notifyTplGets)
+		pages.GET("/notify-tpls", rt.auth(), rt.user(), rt.perm("/help/notification-tpls"), rt.notifyTplGets)
 		pages.PUT("/notify-tpl/content", rt.auth(), rt.admin(), rt.notifyTplUpdateContent)
 		pages.PUT("/notify-tpl", rt.auth(), rt.admin(), rt.notifyTplUpdate)
 		pages.POST("/notify-tpl", rt.auth(), rt.admin(), rt.notifyTplAdd)
@@ -379,19 +380,19 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/sso-configs", rt.auth(), rt.admin(), rt.ssoConfigGets)
 		pages.PUT("/sso-config", rt.auth(), rt.admin(), rt.ssoConfigUpdate)
 
-		pages.GET("/webhooks", rt.auth(), rt.admin(), rt.webhookGets)
+		pages.GET("/webhooks", rt.auth(), rt.user(), rt.webhookGets)
 		pages.PUT("/webhooks", rt.auth(), rt.admin(), rt.webhookPuts)
 
-		pages.GET("/notify-script", rt.auth(), rt.admin(), rt.notifyScriptGet)
+		pages.GET("/notify-script", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyScriptGet)
 		pages.PUT("/notify-script", rt.auth(), rt.admin(), rt.notifyScriptPut)
 
-		pages.GET("/notify-channel", rt.auth(), rt.admin(), rt.notifyChannelGets)
+		pages.GET("/notify-channel", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyChannelGets)
 		pages.PUT("/notify-channel", rt.auth(), rt.admin(), rt.notifyChannelPuts)
 
-		pages.GET("/notify-contact", rt.auth(), rt.admin(), rt.notifyContactGets)
+		pages.GET("/notify-contact", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyContactGets)
 		pages.PUT("/notify-contact", rt.auth(), rt.admin(), rt.notifyContactPuts)
 
-		pages.GET("/notify-config", rt.auth(), rt.admin(), rt.notifyConfigGet)
+		pages.GET("/notify-config", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyConfigGet)
 		pages.PUT("/notify-config", rt.auth(), rt.admin(), rt.notifyConfigPut)
 		pages.PUT("/smtp-config-test", rt.auth(), rt.admin(), rt.attemptSendEmail)
 
@@ -401,13 +402,17 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternPut)
 		pages.DELETE("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternDel)
 
-		pages.GET("/user-variable-configs", rt.auth(), rt.admin(), rt.userVariableConfigGets)
-		pages.POST("/user-variable-config", rt.auth(), rt.admin(), rt.userVariableConfigAdd)
-		pages.PUT("/user-variable-config/:id", rt.auth(), rt.admin(), rt.userVariableConfigPut)
-		pages.DELETE("/user-variable-config/:id", rt.auth(), rt.admin(), rt.userVariableConfigDel)
+		pages.GET("/user-variable-configs", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigGets)
+		pages.POST("/user-variable-config", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigAdd)
+		pages.PUT("/user-variable-config/:id", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigPut)
+		pages.DELETE("/user-variable-config/:id", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigDel)
 
 		pages.GET("/config", rt.auth(), rt.admin(), rt.configGetByKey)
 		pages.PUT("/config", rt.auth(), rt.admin(), rt.configPutByKey)
+		pages.GET("/site-info", rt.siteInfo)
+
+		// for admin api
+		pages.GET("/user/busi-groups", rt.auth(), rt.admin(), rt.userBusiGroupsGets)
 
 	}
 
@@ -418,7 +423,12 @@ func (rt *Router) Config(r *gin.Engine) {
 			v = version.Version[:lastIndex]
 		}
 
-		ginx.NewRender(c).Data(gin.H{"version": v, "github_verison": version.GithubVersion.Load().(string)}, nil)
+		gv := version.GithubVersion.Load()
+		if gv != nil {
+			ginx.NewRender(c).Data(gin.H{"version": v, "github_verison": gv.(string)}, nil)
+		} else {
+			ginx.NewRender(c).Data(gin.H{"version": v, "github_verison": ""}, nil)
+		}
 	})
 
 	if rt.HTTP.APIForService.Enable {
@@ -483,6 +493,8 @@ func (rt *Router) Config(r *gin.Engine) {
 			service.GET("/notify-tpls", rt.notifyTplGets)
 
 			service.POST("/task-record-add", rt.taskRecordAdd)
+
+			service.GET("/user-variable/decrypt", rt.userVariableGetDecryptByService)
 		}
 	}
 

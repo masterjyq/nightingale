@@ -50,15 +50,16 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 	pushgwRouter.Config(r)
 
 	if !config.Alert.Disable {
+		configCache := memsto.NewConfigCache(ctx, syncStats, nil, "")
 		alertStats := astats.NewSyncStats()
 		dsCache := memsto.NewDatasourceCache(ctx, syncStats)
 		alertMuteCache := memsto.NewAlertMuteCache(ctx, syncStats)
 		alertRuleCache := memsto.NewAlertRuleCache(ctx, syncStats)
-		notifyConfigCache := memsto.NewNotifyConfigCache(ctx)
+		notifyConfigCache := memsto.NewNotifyConfigCache(ctx, configCache)
 		userCache := memsto.NewUserCache(ctx, syncStats)
 		userGroupCache := memsto.NewUserGroupCache(ctx, syncStats)
 
-		promClients := prom.NewPromClient(ctx, config.Alert.Heartbeat)
+		promClients := prom.NewPromClient(ctx)
 		tdengineClients := tdengine.NewTdengineClient(ctx, config.Alert.Heartbeat)
 		externalProcessors := process.NewExternalProcessors()
 
