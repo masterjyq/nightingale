@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ccfos/nightingale/v6/models"
+	"github.com/ccfos/nightingale/v6/pkg/flashduty"
 	"github.com/ccfos/nightingale/v6/pkg/ormx"
 
 	"github.com/gin-gonic/gin"
@@ -79,7 +80,7 @@ func (rt *Router) userAddPost(c *gin.Context) {
 		ginx.Bomb(http.StatusBadRequest, "roles empty")
 	}
 
-	user := c.MustGet("user").(*models.User)
+	username := Username(c)
 
 	u := models.User{
 		Username: f.Username,
@@ -90,10 +91,11 @@ func (rt *Router) userAddPost(c *gin.Context) {
 		Portrait: f.Portrait,
 		Roles:    strings.Join(f.Roles, " "),
 		Contacts: f.Contacts,
-		CreateBy: user.Username,
-		UpdateBy: user.Username,
+		CreateBy: username,
+		UpdateBy: username,
 	}
 
+	ginx.Dangerous(u.Verify())
 	ginx.NewRender(c).Message(u.Add(rt.Ctx))
 }
 
@@ -110,6 +112,30 @@ type userProfileForm struct {
 	Contacts ormx.JSONObj `json:"contacts"`
 }
 
+func (rt *Router) userProfilePutByService(c *gin.Context) {
+	var f models.User
+	ginx.BindJSON(c, &f)
+
+	if len(f.RolesLst) == 0 {
+		ginx.Bomb(http.StatusBadRequest, "roles empty")
+	}
+
+	password, err := models.CryptoPass(rt.Ctx, f.Password)
+	ginx.Dangerous(err)
+
+	target := User(rt.Ctx, ginx.UrlParamInt64(c, "id"))
+	target.Nickname = f.Nickname
+	target.Password = password
+	target.Phone = f.Phone
+	target.Email = f.Email
+	target.Portrait = f.Portrait
+	target.Roles = strings.Join(f.RolesLst, " ")
+	target.Contacts = f.Contacts
+	target.UpdateBy = Username(c)
+
+	ginx.NewRender(c).Message(target.UpdateAllFields(rt.Ctx))
+}
+
 func (rt *Router) userProfilePut(c *gin.Context) {
 	var f userProfileForm
 	ginx.BindJSON(c, &f)
@@ -119,12 +145,21 @@ func (rt *Router) userProfilePut(c *gin.Context) {
 	}
 
 	target := User(rt.Ctx, ginx.UrlParamInt64(c, "id"))
+	oldInfo := models.User{
+		Username: target.Username,
+		Phone:    target.Phone,
+		Email:    target.Email,
+	}
 	target.Nickname = f.Nickname
 	target.Phone = f.Phone
 	target.Email = f.Email
 	target.Roles = strings.Join(f.Roles, " ")
 	target.Contacts = f.Contacts
 	target.UpdateBy = c.MustGet("username").(string)
+
+	if flashduty.NeedSyncUser(rt.Ctx) {
+		flashduty.UpdateUser(rt.Ctx, oldInfo, f.Email, f.Phone)
+	}
 
 	ginx.NewRender(c).Message(target.UpdateAllFields(rt.Ctx))
 }

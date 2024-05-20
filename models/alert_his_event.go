@@ -68,7 +68,15 @@ func (e *AlertHisEvent) DB2FE() {
 	e.NotifyGroupsJSON = strings.Fields(e.NotifyGroups)
 	e.CallbacksJSON = strings.Fields(e.Callbacks)
 	e.TagsJSON = strings.Split(e.Tags, ",,")
-	json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON)
+
+	if len(e.Annotations) > 0 {
+		err := json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON)
+		if err != nil {
+			e.AnnotationsJSON = make(map[string]string)
+			e.AnnotationsJSON["error"] = e.Annotations
+		}
+	}
+
 	json.Unmarshal([]byte(e.RuleConfig), &e.RuleConfigJson)
 }
 
@@ -180,7 +188,7 @@ func AlertHisEventGets(ctx *ctx.Context, prods []string, bgid, stime, etime int6
 	}
 
 	var lst []AlertHisEvent
-	err := session.Order("id desc").Limit(limit).Offset(offset).Find(&lst).Error
+	err := session.Order("trigger_time desc").Limit(limit).Offset(offset).Find(&lst).Error
 
 	if err == nil {
 		for i := 0; i < len(lst); i++ {

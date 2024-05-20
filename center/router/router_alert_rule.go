@@ -29,13 +29,23 @@ func (rt *Router) alertRuleGets(c *gin.Context) {
 }
 
 func (rt *Router) alertRuleGetsByGids(c *gin.Context) {
-	gids := str.IdsInt64(ginx.QueryStr(c, "gids"), ",")
-	if len(gids) == 0 {
-		ginx.NewRender(c, http.StatusBadRequest).Message("arg(gids) is empty")
-		return
-	}
-	for _, gid := range gids {
-		rt.bgroCheck(c, gid)
+	gids := str.IdsInt64(ginx.QueryStr(c, "gids", ""), ",")
+	if len(gids) > 0 {
+		for _, gid := range gids {
+			rt.bgroCheck(c, gid)
+		}
+	} else {
+		me := c.MustGet("user").(*models.User)
+		if !me.IsAdmin() {
+			var err error
+			gids, err = models.MyBusiGroupIds(rt.Ctx, me.Id)
+			ginx.Dangerous(err)
+
+			if len(gids) == 0 {
+				ginx.Bomb(http.StatusForbidden, "forbidden")
+				return
+			}
+		}
 	}
 
 	ars, err := models.AlertRuleGetsByBGIds(rt.Ctx, gids)
@@ -121,6 +131,17 @@ func (rt *Router) alertRuleAddByService(c *gin.Context) {
 	}
 	reterr := rt.alertRuleAddForService(lst, "")
 	ginx.NewRender(c).Data(reterr, nil)
+}
+
+func (rt *Router) alertRuleAddOneByService(c *gin.Context) {
+	var f models.AlertRule
+	ginx.BindJSON(c, &f)
+
+	err := f.FE2DB()
+	ginx.Dangerous(err)
+
+	err = f.Add(rt.Ctx)
+	ginx.NewRender(c).Data(f.Id, err)
 }
 
 func (rt *Router) alertRuleAddForService(lst []models.AlertRule, username string) map[string]string {
@@ -344,4 +365,26 @@ func (rt *Router) alertRuleValidation(c *gin.Context) {
 	}
 
 	ginx.NewRender(c).Message("")
+}
+
+func (rt *Router) alertRuleCallbacks(c *gin.Context) {
+	user := c.MustGet("user").(*models.User)
+	bussGroupIds, err := models.MyBusiGroupIds(rt.Ctx, user.Id)
+	ginx.Dangerous(err)
+
+	ars, err := models.AlertRuleGetsByBGIds(rt.Ctx, bussGroupIds)
+	ginx.Dangerous(err)
+
+	var callbacks []string
+	callbackFilter := make(map[string]struct{})
+	for i := range ars {
+		for _, callback := range ars[i].CallbacksJSON {
+			if _, ok := callbackFilter[callback]; !ok {
+				callbackFilter[callback] = struct{}{}
+				callbacks = append(callbacks, callback)
+			}
+		}
+	}
+
+	ginx.NewRender(c).Data(callbacks, nil)
 }

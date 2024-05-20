@@ -48,6 +48,7 @@ type AlertCurEvent struct {
 	TargetNote         string            `json:"target_note"`
 	TriggerTime        int64             `json:"trigger_time"`
 	TriggerValue       string            `json:"trigger_value"`
+	TriggerValues      string            `json:"trigger_values" gorm:"-"`
 	Tags               string            `json:"-"`                         // for db
 	TagsJSON           []string          `json:"tags" gorm:"-"`             // for fe
 	TagsMap            map[string]string `json:"tags_map" gorm:"-"`         // for internal usage
@@ -87,6 +88,49 @@ func (e *AlertCurEvent) ParseRule(field string) error {
 		return nil
 	}
 
+	if field == "annotations" {
+		err := json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON)
+		if err != nil {
+			logger.Warningf("ruleid:%d failed to parse annotations: %v", e.RuleId, err)
+			e.AnnotationsJSON = make(map[string]string)
+			e.AnnotationsJSON["error"] = e.Annotations
+		}
+
+		for k, v := range e.AnnotationsJSON {
+			f = v
+			var defs = []string{
+				"{{$labels := .TagsMap}}",
+				"{{$value := .TriggerValue}}",
+			}
+
+			text := strings.Join(append(defs, f), "")
+			t, err := template.New(fmt.Sprint(e.RuleId)).Funcs(template.FuncMap(tplx.TemplateFuncMap)).Parse(text)
+			if err != nil {
+				e.AnnotationsJSON[k] = fmt.Sprintf("failed to parse annotations: %v", err)
+				continue
+			}
+
+			var body bytes.Buffer
+			err = t.Execute(&body, e)
+			if err != nil {
+				e.AnnotationsJSON[k] = fmt.Sprintf("failed to parse annotations: %v", err)
+				continue
+			}
+
+			e.AnnotationsJSON[k] = body.String()
+		}
+
+		b, err := json.Marshal(e.AnnotationsJSON)
+		if err != nil {
+			e.AnnotationsJSON = make(map[string]string)
+			e.AnnotationsJSON["error"] = fmt.Sprintf("failed to parse annotations: %v", err)
+		} else {
+			e.Annotations = string(b)
+		}
+
+		return nil
+	}
+
 	var defs = []string{
 		"{{$labels := .TagsMap}}",
 		"{{$value := .TriggerValue}}",
@@ -110,11 +154,6 @@ func (e *AlertCurEvent) ParseRule(field string) error {
 
 	if field == "rule_note" {
 		e.RuleNote = body.String()
-	}
-
-	if field == "annotations" {
-		e.Annotations = body.String()
-		json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON)
 	}
 
 	return nil
@@ -377,7 +416,7 @@ func AlertCurEventGets(ctx *ctx.Context, prods []string, bgid, stime, etime int6
 	}
 
 	var lst []AlertCurEvent
-	err := session.Order("id desc").Limit(limit).Offset(offset).Find(&lst).Error
+	err := session.Order("trigger_time desc").Limit(limit).Offset(offset).Find(&lst).Error
 
 	if err == nil {
 		for i := 0; i < len(lst); i++ {
@@ -457,7 +496,7 @@ func AlertCurEventGetByIds(ctx *ctx.Context, ids []int64) ([]*AlertCurEvent, err
 		return lst, nil
 	}
 
-	err := DB(ctx).Where("id in ?", ids).Order("id desc").Find(&lst).Error
+	err := DB(ctx).Where("id in ?", ids).Order("trigger_time desc").Find(&lst).Error
 	if err == nil {
 		for i := 0; i < len(lst); i++ {
 			lst[i].DB2FE()
@@ -570,16 +609,13 @@ func AlertCurEventUpgradeToV6(ctx *ctx.Context, dsm map[string]Datasource) error
 func AlertCurEventGetsFromAlertMute(ctx *ctx.Context, alertMute *AlertMute) ([]*AlertCurEvent, error) {
 	var lst []*AlertCurEvent
 
-	tx := DB(ctx).Where("group_id = ? and rule_prod = ?", alertMute.GroupId, alertMute.Prod)
+	tx := DB(ctx).Where("group_id = ?", alertMute.GroupId)
 
 	if len(alertMute.SeveritiesJson) != 0 {
 		tx = tx.Where("severity IN (?)", alertMute.SeveritiesJson)
 	}
-	if alertMute.Prod != HOST {
-		tx = tx.Where("cate = ?", alertMute.Cate)
-		if alertMute.DatasourceIdsJson != nil && !IsAllDatasource(alertMute.DatasourceIdsJson) {
-			tx = tx.Where("datasource_id IN (?)", alertMute.DatasourceIdsJson)
-		}
+	if len(alertMute.DatasourceIdsJson) != 0 && !IsAllDatasource(alertMute.DatasourceIdsJson) {
+		tx = tx.Where("datasource_id IN (?)", alertMute.DatasourceIdsJson)
 	}
 
 	err := tx.Order("id desc").Find(&lst).Error

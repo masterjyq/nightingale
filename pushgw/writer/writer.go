@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ccfos/nightingale/v6/pkg/fasttime"
 	"github.com/ccfos/nightingale/v6/pushgw/pconf"
 
 	"github.com/golang/protobuf/proto"
@@ -32,6 +33,7 @@ func (w WriterType) writeRelabel(items []prompb.TimeSeries) []prompb.TimeSeries 
 		if len(lbls) == 0 {
 			continue
 		}
+		item.Labels = lbls
 		ritems = append(ritems, item)
 	}
 	return ritems
@@ -54,7 +56,7 @@ func (w WriterType) Write(key string, items []prompb.TimeSeries, headers ...map[
 	}()
 
 	if w.ForceUseServerTS {
-		ts := time.Now().UnixMilli()
+		ts := int64(fasttime.UnixTimestamp()) * 1000
 		for i := 0; i < len(items); i++ {
 			if len(items[i].Samples) == 0 {
 				continue
@@ -74,6 +76,7 @@ func (w WriterType) Write(key string, items []prompb.TimeSeries, headers ...map[
 	}
 
 	if err := w.Post(snappy.Encode(nil, data), headers...); err != nil {
+		CounterWirteErrorTotal.WithLabelValues(key).Add(float64(len(items)))
 		logger.Warningf("post to %s got error: %v", w.Opts.Url, err)
 		logger.Warning("example timeseries:", items[0].String())
 	}
@@ -147,6 +150,16 @@ type IdentQueue struct {
 	ts      int64
 }
 
+func (ws *WritersType) ReportQueueStats(ident string, identQueue *IdentQueue) (interface{}, bool) {
+	for {
+		time.Sleep(60 * time.Second)
+		count := identQueue.list.Len()
+		if count > ws.pushgw.IdentStatsThreshold {
+			GaugeSampleQueueSize.WithLabelValues(ident).Set(float64(count))
+		}
+	}
+}
+
 func NewWriters(pushgwConfig pconf.Pushgw) *WritersType {
 	writers := &WritersType{
 		backends: make(map[string]WriterType),
@@ -199,6 +212,7 @@ func (ws *WritersType) PushSample(ident string, v interface{}) {
 		ws.queues[ident] = identQueue
 		ws.Unlock()
 
+		go ws.ReportQueueStats(ident, identQueue)
 		go ws.StartConsumer(identQueue)
 	}
 
@@ -206,6 +220,7 @@ func (ws *WritersType) PushSample(ident string, v interface{}) {
 	succ := identQueue.list.PushFront(v)
 	if !succ {
 		logger.Warningf("Write channel(%s) full, current channel size: %d", ident, identQueue.list.Len())
+		CounterPushQueueErrorTotal.WithLabelValues(ident).Inc()
 	}
 }
 

@@ -18,7 +18,6 @@ import (
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/tplx"
-	"github.com/ccfos/nightingale/v6/prom"
 	"github.com/toolkits/pkg/logger"
 	"github.com/toolkits/pkg/str"
 )
@@ -49,6 +48,7 @@ type HandleEventFunc func(event *models.AlertCurEvent)
 
 type Processor struct {
 	datasourceId int64
+	EngineName   string
 
 	rule     *models.AlertRule
 	fires    *AlertCurEventMap
@@ -61,15 +61,15 @@ type Processor struct {
 	targetNote string
 	groupName  string
 
-	atertRuleCache  *memsto.AlertRuleCacheType
-	TargetCache     *memsto.TargetCacheType
-	BusiGroupCache  *memsto.BusiGroupCacheType
-	alertMuteCache  *memsto.AlertMuteCacheType
-	datasourceCache *memsto.DatasourceCacheType
+	alertRuleCache          *memsto.AlertRuleCacheType
+	TargetCache             *memsto.TargetCacheType
+	TargetsOfAlertRuleCache *memsto.TargetsOfAlertRuleCacheType
+	BusiGroupCache          *memsto.BusiGroupCacheType
+	alertMuteCache          *memsto.AlertMuteCacheType
+	datasourceCache         *memsto.DatasourceCacheType
 
-	promClients *prom.PromClientMap
-	ctx         *ctx.Context
-	Stats       *astats.Stats
+	ctx   *ctx.Context
+	Stats *astats.Stats
 
 	HandleFireEventHook    HandleEventFunc
 	HandleRecoverEventHook HandleEventFunc
@@ -93,19 +93,22 @@ func (p *Processor) Hash() string {
 	))
 }
 
-func NewProcessor(rule *models.AlertRule, datasourceId int64, atertRuleCache *memsto.AlertRuleCacheType, targetCache *memsto.TargetCacheType,
+func NewProcessor(engineName string, rule *models.AlertRule, datasourceId int64, alertRuleCache *memsto.AlertRuleCacheType,
+	targetCache *memsto.TargetCacheType, targetsOfAlertRuleCache *memsto.TargetsOfAlertRuleCacheType,
 	busiGroupCache *memsto.BusiGroupCacheType, alertMuteCache *memsto.AlertMuteCacheType, datasourceCache *memsto.DatasourceCacheType, ctx *ctx.Context,
 	stats *astats.Stats) *Processor {
 
 	p := &Processor{
+		EngineName:   engineName,
 		datasourceId: datasourceId,
 		rule:         rule,
 
-		TargetCache:     targetCache,
-		BusiGroupCache:  busiGroupCache,
-		alertMuteCache:  alertMuteCache,
-		atertRuleCache:  atertRuleCache,
-		datasourceCache: datasourceCache,
+		TargetCache:             targetCache,
+		TargetsOfAlertRuleCache: targetsOfAlertRuleCache,
+		BusiGroupCache:          busiGroupCache,
+		alertMuteCache:          alertMuteCache,
+		alertRuleCache:          alertRuleCache,
+		datasourceCache:         datasourceCache,
 
 		ctx:   ctx,
 		Stats: stats,
@@ -124,11 +127,13 @@ func (p *Processor) Handle(anomalyPoints []common.AnomalyPoint, from string, inh
 	// 这些信息的修改是不会引起worker restart的，但是确实会影响告警处理逻辑
 	// 所以，这里直接从memsto.AlertRuleCache中获取并覆盖
 	p.inhibit = inhibit
-	cachedRule := p.atertRuleCache.Get(p.rule.Id)
+	cachedRule := p.alertRuleCache.Get(p.rule.Id)
 	if cachedRule == nil {
 		logger.Errorf("rule not found %+v", anomalyPoints)
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "handle_event").Inc()
 		return
 	}
+
 	p.rule = cachedRule
 	now := time.Now().Unix()
 	alertingKeys := map[string]struct{}{}
@@ -147,6 +152,8 @@ func (p *Processor) Handle(anomalyPoints []common.AnomalyPoint, from string, inh
 		}
 
 		if p.EventMuteHook(event) {
+			p.Stats.CounterMuteTotal.WithLabelValues(event.GroupName).Inc()
+			logger.Debugf("rule_eval:%s event:%v is muted by hook", p.Key(), event)
 			continue
 		}
 
@@ -172,6 +179,12 @@ func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, no
 	}
 
 	event := p.rule.GenerateNewEvent(p.ctx)
+
+	bg := p.BusiGroupCache.GetByBusiGroupId(p.rule.GroupId)
+	if bg != nil {
+		event.GroupName = bg.Name
+	}
+
 	event.TriggerTime = anomalyPoint.Timestamp
 	event.TagsMap = p.tagsMap
 	event.DatasourceId = p.datasourceId
@@ -180,8 +193,8 @@ func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, no
 	event.TargetIdent = p.target
 	event.TargetNote = p.targetNote
 	event.TriggerValue = anomalyPoint.ReadableValue()
+	event.TriggerValues = anomalyPoint.Values
 	event.TagsJSON = p.tagsArr
-	event.GroupName = p.groupName
 	event.Tags = strings.Join(p.tagsArr, ",,")
 	event.IsRecovered = false
 	event.Callbacks = p.rule.Callbacks
@@ -193,6 +206,11 @@ func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, no
 	event.Severity = anomalyPoint.Severity
 	event.ExtraConfig = p.rule.ExtraConfigJSON
 	event.PromQl = anomalyPoint.Query
+
+	if event.TriggerValues != "" && strings.Count(event.TriggerValues, "$") > 1 {
+		// TriggerValues 有多个变量，将多个变量都放到 TriggerValue 中
+		event.TriggerValue = event.TriggerValues
+	}
 
 	if from == "inner" {
 		event.LastEvalTime = now
@@ -218,11 +236,12 @@ func (p *Processor) HandleRecover(alertingKeys map[string]struct{}, now int64) {
 	}
 }
 
-func (p *Processor) RecoverSingle(hash string, now int64, value *string) {
+func (p *Processor) RecoverSingle(hash string, now int64, value *string, values ...string) {
 	cachedRule := p.rule
 	if cachedRule == nil {
 		return
 	}
+
 	event, has := p.fires.Get(hash)
 	if !has {
 		return
@@ -234,6 +253,9 @@ func (p *Processor) RecoverSingle(hash string, now int64, value *string) {
 	}
 	if value != nil {
 		event.TriggerValue = *value
+		if len(values) > 0 {
+			event.TriggerValues = values[0]
+		}
 	}
 
 	// 没查到触发阈值的vector，姑且就认为这个vector的值恢复了
@@ -353,6 +375,7 @@ func (p *Processor) pushEventToQueue(e *models.AlertCurEvent) {
 	dispatch.LogEvent(e, "push_queue")
 	if !queue.EventQueue.PushFront(e) {
 		logger.Warningf("event_push_queue: queue is full, event:%+v", e)
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "push_event_queue").Inc()
 	}
 }
 
@@ -362,12 +385,21 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 	curEvents, err := models.AlertCurEventGetByRuleIdAndDsId(p.ctx, p.rule.Id, p.datasourceId)
 	if err != nil {
 		logger.Errorf("recover event from db for rule:%s failed, err:%s", p.Key(), err)
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "get_recover_event").Inc()
 		p.fires = NewAlertCurEventMap(nil)
 		return
 	}
 
 	fireMap := make(map[string]*models.AlertCurEvent)
 	for _, event := range curEvents {
+		if event.Cate == models.HOST {
+			target, exists := p.TargetCache.Get(event.TargetIdent)
+			if exists && target.EngineName != p.EngineName && !(p.ctx.IsCenter && target.EngineName == "") {
+				// 如果是 host rule，且 target 的 engineName 不是当前的 engineName 或者是中心机房 target EngineName 为空，就跳过
+				continue
+			}
+		}
+
 		event.DB2Mem()
 		fireMap[event.Hash] = event
 	}

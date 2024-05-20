@@ -28,6 +28,14 @@ func LoadOpsYaml(configDir string, opsYamlFile string) error {
 	if !file.IsExist(fp) {
 		return nil
 	}
+
+	hash, _ := file.MD5(fp)
+	if hash == "2f91a9ed265cf2024e266dc1d538ee77" {
+		// ops.yaml 是老的默认文件，删除
+		file.Remove(fp)
+		return nil
+	}
+
 	return file.ReadYaml(fp, &Operations)
 }
 
@@ -128,6 +136,7 @@ ops:
     - "/targets/add"
     - "/targets/put"
     - "/targets/del"
+    - "/targets/bind"
 
 - name: job
   cname: 任务管理
@@ -162,6 +171,14 @@ ops:
   - "/busi-groups/add"
   - "/busi-groups/put"
   - "/busi-groups/del"
+
+- name: builtin-metrics
+  cname: 指标视图
+  ops:
+    - "/metrics-built-in"
+    - "/builtin-metrics/add"
+    - "/builtin-metrics/put"
+    - "/builtin-metrics/del"
 
 - name: system
   cname: 系统信息

@@ -27,7 +27,7 @@ KeyFile = ""
 # whether print access log
 PrintAccessLog = false
 # whether enable pprof
-PProf = false
+PProf = true
 # expose prometheus /metrics?
 ExposeMetrics = true
 # http graceful shutdown timeout, unit: s
@@ -88,8 +88,6 @@ MaxLifetime = 7200
 MaxOpenConns = 150
 # max idle connections
 MaxIdleConns = 50
-# table prefix
-TablePrefix = ""
 # enable auto migrate or not
 # EnableAutoMigrate = false
 
@@ -132,7 +130,7 @@ AlertDetail = true
 LabelRewrite = true
 # # default busigroup key name
 # BusiGroupLabelKey = "busigroup"
-# ForceUseServerTS = false
+ForceUseServerTS = true
 
 # [Pushgw.DebugSample]
 # ident = "xx"
@@ -167,9 +165,13 @@ MaxIdleConnsPerHost = 100
 # TLSCert = "/etc/n9e/cert.pem"
 # TLSKey = "/etc/n9e/key.pem"
 # InsecureSkipVerify = false
-# [[Writers.WriteRelabels]]
+# [[Pushgw.Writers.WriteRelabels]]
 # Action = "replace"
 # SourceLabels = ["__address__"]
 # Regex = "([^:]+)(?::\\d+)?"
 # Replacement = "$1:80"
 # TargetLabel = "__address__"
+
+[Ibex]
+Enable = false
+RPCListen = "0.0.0.0:20090"

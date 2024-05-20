@@ -1,9 +1,15 @@
 package migrate
 
 import (
+	"fmt"
+
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ormx"
+
+	imodels "github.com/flashcatcloud/ibex/src/models"
 	"github.com/toolkits/pkg/logger"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -12,27 +18,61 @@ func Migrate(db *gorm.DB) {
 	MigrateEsIndexPatternTable(db)
 }
 
+func MigrateIbexTables(db *gorm.DB) {
+	dts := []interface{}{&imodels.TaskMeta{}, &imodels.TaskScheduler{}, &imodels.TaskSchedulerHealth{}, &imodels.TaskHostDoing{}, &imodels.TaskAction{}}
+	for _, dt := range dts {
+		err := db.AutoMigrate(dt)
+		if err != nil {
+			logger.Errorf("failed to migrate table:%v %v", dt, err)
+		}
+	}
+
+	for i := 0; i < 100; i++ {
+		tableName := fmt.Sprintf("task_host_%d", i)
+		err := db.Table(tableName).AutoMigrate(&imodels.TaskHost{})
+		if err != nil {
+			logger.Errorf("failed to migrate table:%s %v", tableName, err)
+		}
+	}
+}
+
 func MigrateTables(db *gorm.DB) error {
+	var tableOptions string
+	switch db.Dialector.(type) {
+	case *mysql.Dialector:
+		tableOptions = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+	case *postgres.Dialector:
+		tableOptions = "ENCODING='UTF8'"
+	}
+	if tableOptions != "" {
+		db = db.Set("gorm:table_options", tableOptions)
+	}
+
 	dts := []interface{}{&RecordingRule{}, &AlertRule{}, &AlertSubscribe{}, &AlertMute{},
-		&TaskRecord{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}}
+		&TaskRecord{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}, &NotifyTpl{},
+		&Board{}, &BoardBusigroup{}, &Users{}, &SsoConfig{}, &models.BuiltinMetric{},
+		&models.MetricFilter{}}
+
 	if !columnHasIndex(db, &AlertHisEvent{}, "last_eval_time") {
 		dts = append(dts, &AlertHisEvent{})
 	}
-	err := db.AutoMigrate(dts...)
-	if err != nil {
-		logger.Errorf("failed to migrate table: %v", err)
-		return err
+
+	for _, dt := range dts {
+		err := db.AutoMigrate(dt)
+		if err != nil {
+			logger.Errorf("failed to migrate table: %v", err)
+		}
 	}
 
 	if db.Migrator().HasColumn(&AlertingEngines{}, "cluster") {
-		err = db.Migrator().RenameColumn(&AlertingEngines{}, "cluster", "engine_cluster")
+		err := db.Migrator().RenameColumn(&AlertingEngines{}, "cluster", "engine_cluster")
 		if err != nil {
 			logger.Errorf("failed to renameColumn table: %v", err)
-			return err
 		}
 	}
+
 	if db.Migrator().HasColumn(&ChartShare{}, "dashboard_id") {
-		err = db.Migrator().DropColumn(&ChartShare{}, "dashboard_id")
+		err := db.Migrator().DropColumn(&ChartShare{}, "dashboard_id")
 		if err != nil {
 			logger.Errorf("failed to DropColumn table: %v", err)
 		}
@@ -125,10 +165,12 @@ type AlertSubscribe struct {
 	Severities  string       `gorm:"column:severities;type:varchar(32);not null;default:''"`
 	BusiGroups  ormx.JSONArr `gorm:"column:busi_groups;type:varchar(4096);not null;default:'[]'"`
 	Note        string       `gorm:"column:note;type:varchar(1024);default:'';comment:note"`
+	RuleIds     []int64      `gorm:"column:rule_ids;type:varchar(1024);default:'';comment:rule_ids"`
 }
 
 type AlertMute struct {
 	Severities string `gorm:"column:severities;type:varchar(32);not null;default:''"`
+	Tags       string `gorm:"column:tags;type:varchar(4096);default:'[]';comment:json,map,tagkey->regexp|value"`
 }
 
 type RecordingRule struct {
@@ -152,6 +194,7 @@ type AlertHisEvent struct {
 type Target struct {
 	HostIp       string `gorm:"column:host_ip;varchar(15);default:'';comment:IPv4 string;index:idx_host_ip"`
 	AgentVersion string `gorm:"column:agent_version;varchar(255);default:'';comment:agent version;index:idx_agent_version"`
+	EngineName   string `gorm:"column:engine_name;varchar(255);default:'';comment:engine name;index:idx_engine_name"`
 }
 
 type Datasource struct {
@@ -168,4 +211,28 @@ type Configs struct {
 	CreateBy  string `gorm:"column:create_by;type:varchar(64);default:'';comment:cerate_by"`
 	UpdateAt  int64  `gorm:"column:update_at;type:int;default:0;comment:update_at"`
 	UpdateBy  string `gorm:"column:update_by;type:varchar(64);default:'';comment:update_by"`
+}
+
+type NotifyTpl struct {
+	CreateAt int64  `gorm:"column:create_at;type:int;default:0;comment:create_at"`
+	CreateBy string `gorm:"column:create_by;type:varchar(64);default:'';comment:cerate_by"`
+	UpdateAt int64  `gorm:"column:update_at;type:int;default:0;comment:update_at"`
+	UpdateBy string `gorm:"column:update_by;type:varchar(64);default:'';comment:update_by"`
+}
+
+type Board struct {
+	PublicCate int `gorm:"column:public_cate;int;not null;default:0;comment:0 anonymous 1 login 2 busi"`
+}
+
+type BoardBusigroup struct {
+	BusiGroupId int64 `gorm:"column:busi_group_id;bigint(20);not null;default:0;comment:busi group id"`
+	BoardId     int64 `gorm:"column:board_id;bigint(20);not null;default:0;comment:board id"`
+}
+
+type Users struct {
+	Belong string `gorm:"column:belong;varchar(16);default:'';comment:belong"`
+}
+
+type SsoConfig struct {
+	UpdateAt int64 `gorm:"column:update_at;type:int;default:0;comment:update_at"`
 }

@@ -108,6 +108,7 @@ type HostTrigger struct {
 }
 
 type RuleQuery struct {
+	Version  string        `json:"version"`
 	Inhibit  bool          `json:"inhibit"`
 	Queries  []interface{} `json:"queries"`
 	Triggers []Trigger     `json:"triggers"`
@@ -436,7 +437,13 @@ func (ar *AlertRule) FillDatasourceIds() error {
 
 func (ar *AlertRule) FillSeverities() error {
 	if ar.RuleConfig != "" {
-		if ar.Cate == PROMETHEUS || ar.Cate == LOKI {
+		var rule RuleQuery
+		if err := json.Unmarshal([]byte(ar.RuleConfig), &rule); err != nil {
+			return err
+		}
+
+		m := make(map[int]struct{})
+		if (ar.Cate == PROMETHEUS || ar.Cate == LOKI) && rule.Version != "v2" {
 			var rule PromRuleConfig
 			if err := json.Unmarshal([]byte(ar.RuleConfig), &rule); err != nil {
 				return err
@@ -446,18 +453,17 @@ func (ar *AlertRule) FillSeverities() error {
 				ar.Severities = append(ar.Severities, rule.Severity)
 				return nil
 			}
-
 			for i := range rule.Queries {
-				ar.Severities = append(ar.Severities, rule.Queries[i].Severity)
+				m[rule.Queries[i].Severity] = struct{}{}
 			}
 		} else {
-			var rule HostRuleConfig
-			if err := json.Unmarshal([]byte(ar.RuleConfig), &rule); err != nil {
-				return err
-			}
 			for i := range rule.Triggers {
-				ar.Severities = append(ar.Severities, rule.Triggers[i].Severity)
+				m[rule.Triggers[i].Severity] = struct{}{}
 			}
+		}
+
+		for k := range m {
+			ar.Severities = append(ar.Severities, k)
 		}
 	}
 	return nil
@@ -678,7 +684,10 @@ func AlertRuleGets(ctx *ctx.Context, groupId int64) ([]AlertRule, error) {
 }
 
 func AlertRuleGetsByBGIds(ctx *ctx.Context, bgids []int64) ([]AlertRule, error) {
-	session := DB(ctx).Where("group_id in (?)", bgids).Order("name")
+	session := DB(ctx)
+	if len(bgids) > 0 {
+		session = session.Where("group_id in (?)", bgids).Order("name")
+	}
 
 	var lst []AlertRule
 	err := session.Find(&lst).Error
@@ -783,18 +792,15 @@ func AlertRuleGetById(ctx *ctx.Context, id int64) (*AlertRule, error) {
 	return AlertRuleGet(ctx, "id=?", id)
 }
 
-func AlertRuleGetName(ctx *ctx.Context, id int64) (string, error) {
-	var names []string
-	err := DB(ctx).Model(new(AlertRule)).Where("id = ?", id).Pluck("name", &names).Error
-	if err != nil {
-		return "", err
+func AlertRuleGetsByIds(ctx *ctx.Context, ids []int64) ([]AlertRule, error) {
+	lst := make([]AlertRule, 0, len(ids))
+	err := DB(ctx).Model(new(AlertRule)).Where("id in ?", ids).Find(&lst).Error
+	if err == nil {
+		for i := 0; i < len(lst); i++ {
+			lst[i].DB2FE()
+		}
 	}
-
-	if len(names) == 0 {
-		return "", nil
-	}
-
-	return names[0], nil
+	return lst, err
 }
 
 func AlertRuleStatistics(ctx *ctx.Context) (*Statistics, error) {
@@ -944,4 +950,54 @@ func AlertRuleUpgradeToV6(ctx *ctx.Context, dsm map[string]Datasource) error {
 
 	}
 	return nil
+}
+
+func GetTargetsOfHostAlertRule(ctx *ctx.Context, engineName string) (map[string]map[int64][]string, error) {
+	if !ctx.IsCenter {
+		m, err := poster.GetByUrls[map[string]map[int64][]string](ctx, "/v1/n9e/targets-of-alert-rule?engine_name="+engineName)
+		return m, err
+	}
+
+	m := make(map[string]map[int64][]string)
+	hostAlertRules, err := AlertRulesGetsBy(ctx, []string{"host"}, "", "", "", []string{}, 0)
+	if err != nil {
+		return m, err
+	}
+
+	for i := 0; i < len(hostAlertRules); i++ {
+		var rule *HostRuleConfig
+		if err := json.Unmarshal([]byte(hostAlertRules[i].RuleConfig), &rule); err != nil {
+			logger.Errorf("rule:%d rule_config:%s, error:%v", hostAlertRules[i].Id, hostAlertRules[i].RuleConfig, err)
+			continue
+		}
+
+		if rule == nil {
+			logger.Errorf("rule:%d rule_config:%s, error:rule is nil", hostAlertRules[i].Id, hostAlertRules[i].RuleConfig)
+			continue
+		}
+
+		query := GetHostsQuery(rule.Queries)
+		session := TargetFilterQueryBuild(ctx, query, 0, 0)
+		var lst []*Target
+		err := session.Find(&lst).Error
+		if err != nil {
+			logger.Errorf("failed to query targets: %v", err)
+			continue
+		}
+
+		for _, target := range lst {
+			if _, exists := m[target.EngineName]; !exists {
+				m[target.EngineName] = make(map[int64][]string)
+			}
+
+			if _, exists := m[target.EngineName][hostAlertRules[i].Id]; !exists {
+				m[target.EngineName][hostAlertRules[i].Id] = []string{}
+			}
+
+			m[target.EngineName][hostAlertRules[i].Id] = append(m[target.EngineName][hostAlertRules[i].Id], target.Ident)
+			logger.Debugf("get_targets_of_alert_rule engine:%s, rule:%d, target:%s", target.EngineName, hostAlertRules[i].Id, target.Ident)
+		}
+	}
+
+	return m, nil
 }

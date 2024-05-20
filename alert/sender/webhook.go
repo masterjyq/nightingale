@@ -38,7 +38,7 @@ func SendWebhooks(webhooks []*models.Webhook, event *models.AlertCurEvent, stats
 
 		if len(conf.Headers) > 0 && len(conf.Headers)%2 == 0 {
 			for i := 0; i < len(conf.Headers); i += 2 {
-				if conf.Headers[i] == "host" {
+				if conf.Headers[i] == "host" || conf.Headers[i] == "Host" {
 					req.Host = conf.Headers[i+1]
 					continue
 				}
@@ -66,6 +66,6 @@ func SendWebhooks(webhooks []*models.Webhook, event *models.AlertCurEvent, stats
 			body, _ = io.ReadAll(resp.Body)
 		}
 
-		logger.Debugf("event_webhook_succ, url: %s, response code: %d, body: %s", conf.Url, resp.StatusCode, string(body))
+		logger.Debugf("event_webhook_succ, url: %s, response code: %d, body: %s event:%+v", conf.Url, resp.StatusCode, string(body), event)
 	}
 }

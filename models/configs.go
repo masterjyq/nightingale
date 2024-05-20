@@ -39,10 +39,6 @@ var (
 	ConfigEncrypted = 1 //ciphertext
 )
 
-func (c *Configs) DB2FE() error {
-	return nil
-}
-
 const (
 	SALT            = "salt"
 	RSA_PRIVATE_KEY = "rsa_private_key"
@@ -139,7 +135,22 @@ func ConfigsSetWithUname(ctx *ctx.Context, ckey, cval, uName string) error { //b
 	return err
 }
 
+func ConfigsGetFlashDutyAppKey(ctx *ctx.Context) (string, error) {
+	configs, err := ConfigsSelectByCkey(ctx, "flashduty_app_key")
+	if err != nil {
+		return "", err
+	}
+	if len(configs) == 0 || configs[0].Cval == "" {
+		return "", errors.New("flashduty_app_key is empty")
+	}
+	return configs[0].Cval, nil
+}
+
 func ConfigsSelectByCkey(ctx *ctx.Context, ckey string) ([]Configs, error) {
+	if !ctx.IsCenter {
+		return []Configs{}, nil
+	}
+
 	var objs []Configs
 	err := DB(ctx).Where("ckey=?", ckey).Find(&objs).Error
 	if err != nil {
@@ -253,8 +264,17 @@ func userVariableCheck(context *ctx.Context, ckey string, id int64) error {
 	var objs []*Configs
 	var err error
 	if !isCStyleIdentifier(ckey) {
-		return fmt.Errorf("invalid key(%q), please use C-style naming convention ", ckey)
+		return fmt.Errorf("invalid key(%q), please use ^[a-zA-Z_][a-zA-Z0-9_]*$ ", ckey)
 	}
+
+	//  reserved words
+	words := []string{"Scheme", "Host", "Hostname", "Port", "Path", "Query", "Fragment"}
+	for _, word := range words {
+		if ckey == word {
+			return fmt.Errorf("invalid key(%q), reserved words, please use other key", ckey)
+		}
+	}
+
 	if id != 0 { //update
 		err = DB(context).Where("id <> ? and ckey = ? and external=?", &id, ckey, ConfigExternal).Find(&objs).Error
 	} else {

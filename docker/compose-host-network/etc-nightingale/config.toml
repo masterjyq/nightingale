@@ -97,8 +97,6 @@ MaxLifetime = 7200
 MaxOpenConns = 150
 # max idle connections
 MaxIdleConns = 50
-# table prefix
-TablePrefix = ""
 # enable auto migrate or not
 # EnableAutoMigrate = false
 
@@ -141,7 +139,7 @@ AlertDetail = true
 LabelRewrite = true
 # # default busigroup key name
 # BusiGroupLabelKey = "busigroup"
-# ForceUseServerTS = false
+ForceUseServerTS = true
 
 # [Pushgw.DebugSample]
 # ident = "xx"
@@ -182,3 +180,7 @@ MaxIdleConnsPerHost = 100
 # Regex = "([^:]+)(?::\\d+)?"
 # Replacement = "$1:80"
 # TargetLabel = "__address__"
+
+[Ibex]
+Enable = true
+RPCListen = "0.0.0.0:20090"
