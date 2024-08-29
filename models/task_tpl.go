@@ -150,8 +150,8 @@ func (t *TaskTpl) CleanFields() error {
 		t.Timeout = 30
 	}
 
-	if t.Timeout > 3600*24 {
-		return errors.New("arg(timeout) longer than one day")
+	if t.Timeout > 3600*24*5 {
+		return errors.New("arg(timeout) longer than five days")
 	}
 
 	t.Pause = strings.Replace(t.Pause, "，", ",", -1)
@@ -187,6 +187,11 @@ func (t *TaskTpl) CleanFields() error {
 	return nil
 }
 
+type TaskTplHost struct {
+	Id   int64  `json:"id"`
+	Host string `json:"host"`
+}
+
 func (t *TaskTpl) Save(ctx *ctx.Context, hosts []string) error {
 	if err := t.CleanFields(); err != nil {
 		return err
@@ -212,10 +217,12 @@ func (t *TaskTpl) Save(ctx *ctx.Context, hosts []string) error {
 				continue
 			}
 
-			err := tx.Table("task_tpl_host").Create(map[string]interface{}{
-				"id":   t.Id,
-				"host": host,
-			}).Error
+			taskTplHost := TaskTplHost{
+				Id:   t.Id,
+				Host: host,
+			}
+
+			err := tx.Table("task_tpl_host").Create(&taskTplHost).Error
 
 			if err != nil {
 				return err
@@ -369,8 +376,8 @@ func (f *TaskForm) Verify() error {
 		return fmt.Errorf("arg(timeout) should be nonnegative")
 	}
 
-	if f.Timeout > 3600*24 {
-		return fmt.Errorf("arg(timeout) longer than one day")
+	if f.Timeout > 3600*24*5 {
+		return fmt.Errorf("arg(timeout) longer than five days")
 	}
 
 	if f.Timeout == 0 {

@@ -52,6 +52,8 @@ type AlertCurEvent struct {
 	Tags               string            `json:"-"`                         // for db
 	TagsJSON           []string          `json:"tags" gorm:"-"`             // for fe
 	TagsMap            map[string]string `json:"tags_map" gorm:"-"`         // for internal usage
+	OriginalTags       string            `json:"-"`                         // for db
+	OriginalTagsJSON   []string          `json:"original_tags" gorm:"-"`    // for fe
 	Annotations        string            `json:"-"`                         //
 	AnnotationsJSON    map[string]string `json:"annotations" gorm:"-"`      // for fe
 	IsRecovered        bool              `json:"is_recovered" gorm:"-"`     // for notify.py
@@ -134,6 +136,7 @@ func (e *AlertCurEvent) ParseRule(field string) error {
 	var defs = []string{
 		"{{$labels := .TagsMap}}",
 		"{{$value := .TriggerValue}}",
+		"{{$annotations := .AnnotationsJSON}}",
 	}
 
 	text := strings.Join(append(defs, f), "")
@@ -157,6 +160,35 @@ func (e *AlertCurEvent) ParseRule(field string) error {
 	}
 
 	return nil
+}
+
+func (e *AlertCurEvent) ParseURL(url string) (string, error) {
+
+	f := strings.TrimSpace(url)
+
+	if f == "" {
+		return url, nil
+	}
+
+	var defs = []string{
+		"{{$labels := .TagsMap}}",
+		"{{$value := .TriggerValue}}",
+		"{{$annotations := .AnnotationsJSON}}",
+	}
+
+	text := strings.Join(append(defs, f), "")
+	t, err := template.New("callbackUrl" + fmt.Sprint(e.RuleId)).Funcs(template.FuncMap(tplx.TemplateFuncMap)).Parse(text)
+	if err != nil {
+		return url, nil
+	}
+
+	var body bytes.Buffer
+	err = t.Execute(&body, e)
+	if err != nil {
+		return url, nil
+	}
+
+	return body.String(), nil
 }
 
 func (e *AlertCurEvent) GenCardTitle(rules []*AggrRule) string {
@@ -259,6 +291,7 @@ func (e *AlertCurEvent) ToHis(ctx *ctx.Context) *AlertHisEvent {
 		TriggerTime:      e.TriggerTime,
 		TriggerValue:     e.TriggerValue,
 		Tags:             e.Tags,
+		OriginalTags:     e.OriginalTags,
 		RecoverTime:      recoverTime,
 		LastEvalTime:     e.LastEvalTime,
 		NotifyCurNumber:  e.NotifyCurNumber,
@@ -271,8 +304,13 @@ func (e *AlertCurEvent) DB2FE() error {
 	e.NotifyGroupsJSON = strings.Fields(e.NotifyGroups)
 	e.CallbacksJSON = strings.Fields(e.Callbacks)
 	e.TagsJSON = strings.Split(e.Tags, ",,")
-	json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON)
-	json.Unmarshal([]byte(e.RuleConfig), &e.RuleConfigJson)
+	e.OriginalTagsJSON = strings.Split(e.OriginalTags, ",,")
+	if err := json.Unmarshal([]byte(e.Annotations), &e.AnnotationsJSON); err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(e.RuleConfig), &e.RuleConfigJson); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -281,6 +319,7 @@ func (e *AlertCurEvent) FE2DB() {
 	e.NotifyGroups = strings.Join(e.NotifyGroupsJSON, " ")
 	e.Callbacks = strings.Join(e.CallbacksJSON, " ")
 	e.Tags = strings.Join(e.TagsJSON, ",,")
+	e.OriginalTags = strings.Join(e.OriginalTagsJSON, ",,")
 	b, _ := json.Marshal(e.AnnotationsJSON)
 	e.Annotations = string(b)
 
@@ -309,6 +348,39 @@ func (e *AlertCurEvent) DB2Mem() {
 
 		e.TagsMap[arr[0]] = arr[1]
 	}
+
+	// 解决之前数据库中 FirstTriggerTime 为 0 的情况
+	if e.FirstTriggerTime == 0 {
+		e.FirstTriggerTime = e.TriggerTime
+	}
+}
+
+func FillRuleConfigTplName(ctx *ctx.Context, ruleConfig string) (interface{}, bool) {
+	var config RuleConfig
+	err := json.Unmarshal([]byte(ruleConfig), &config)
+	if err != nil {
+		logger.Warningf("failed to unmarshal rule config: %v", err)
+		return nil, false
+	}
+
+	if len(config.TaskTpls) == 0 {
+		return nil, false
+	}
+
+	for i := 0; i < len(config.TaskTpls); i++ {
+		tpl, err := TaskTplGetById(ctx, config.TaskTpls[i].TplId)
+		if err != nil {
+			logger.Warningf("failed to get task tpl by id:%d, %v", config.TaskTpls[i].TplId, err)
+			return nil, false
+		}
+
+		if tpl == nil {
+			logger.Warningf("task tpl not found by id:%d", config.TaskTpls[i].TplId)
+			return nil, false
+		}
+		config.TaskTpls[i].TplName = tpl.Title
+	}
+	return config, true
 }
 
 // for webui
@@ -346,7 +418,7 @@ func (e *AlertCurEvent) FillNotifyGroups(ctx *ctx.Context, cache map[int64]*User
 	return nil
 }
 
-func AlertCurEventTotal(ctx *ctx.Context, prods []string, bgid, stime, etime int64, severity int, dsIds []int64, cates []string, query string) (int64, error) {
+func AlertCurEventTotal(ctx *ctx.Context, prods []string, bgids []int64, stime, etime int64, severity int, dsIds []int64, cates []string, query string) (int64, error) {
 	session := DB(ctx).Model(&AlertCurEvent{})
 	if stime != 0 && etime != 0 {
 		session = session.Where("trigger_time between ? and ?", stime, etime)
@@ -355,8 +427,8 @@ func AlertCurEventTotal(ctx *ctx.Context, prods []string, bgid, stime, etime int
 		session = session.Where("rule_prod in ?", prods)
 	}
 
-	if bgid > 0 {
-		session = session.Where("group_id = ?", bgid)
+	if len(bgids) > 0 {
+		session = session.Where("group_id in ?", bgids)
 	}
 
 	if severity >= 0 {
@@ -382,7 +454,7 @@ func AlertCurEventTotal(ctx *ctx.Context, prods []string, bgid, stime, etime int
 	return Count(session)
 }
 
-func AlertCurEventGets(ctx *ctx.Context, prods []string, bgid, stime, etime int64, severity int, dsIds []int64, cates []string, query string, limit, offset int) ([]AlertCurEvent, error) {
+func AlertCurEventGets(ctx *ctx.Context, prods []string, bgids []int64, stime, etime int64, severity int, dsIds []int64, cates []string, query string, limit, offset int) ([]AlertCurEvent, error) {
 	session := DB(ctx).Model(&AlertCurEvent{})
 	if stime != 0 && etime != 0 {
 		session = session.Where("trigger_time between ? and ?", stime, etime)
@@ -391,8 +463,8 @@ func AlertCurEventGets(ctx *ctx.Context, prods []string, bgid, stime, etime int6
 		session = session.Where("rule_prod in ?", prods)
 	}
 
-	if bgid > 0 {
-		session = session.Where("group_id = ?", bgid)
+	if len(bgids) > 0 {
+		session = session.Where("group_id in ?", bgids)
 	}
 
 	if severity >= 0 {
@@ -436,6 +508,11 @@ func AlertCurEventDel(ctx *ctx.Context, ids []int64) error {
 }
 
 func AlertCurEventDelByHash(ctx *ctx.Context, hash string) error {
+	if !ctx.IsCenter {
+		_, err := poster.GetByUrls[string](ctx, "/v1/n9e/alert-cur-events-del-by-hash?hash="+hash)
+		return err
+	}
+
 	return DB(ctx).Where("hash = ?", hash).Delete(&AlertCurEvent{}).Error
 }
 
@@ -554,8 +631,8 @@ func AlertCurEventGetMap(ctx *ctx.Context, cluster string) (map[int64]map[string
 	return ret, nil
 }
 
-func (m *AlertCurEvent) UpdateFieldsMap(ctx *ctx.Context, fields map[string]interface{}) error {
-	return DB(ctx).Model(m).Updates(fields).Error
+func (e *AlertCurEvent) UpdateFieldsMap(ctx *ctx.Context, fields map[string]interface{}) error {
+	return DB(ctx).Model(e).Updates(fields).Error
 }
 
 func AlertCurEventUpgradeToV6(ctx *ctx.Context, dsm map[string]Datasource) error {

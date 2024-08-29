@@ -1,6 +1,6 @@
 set names utf8mb4;
 
-drop database if exists n9e_v6;
+-- drop database if exists n9e_v6;
 create database n9e_v6;
 use n9e_v6;
 
@@ -16,6 +16,7 @@ CREATE TABLE `users` (
     `contacts` varchar(1024) comment 'json e.g. {wecom:xx, dingtalk_robot_token:yy}',
     `maintainer` tinyint(1) not null default 0,
     `belong` varchar(16) not null default '' comment 'belong',
+    `last_active_time` bigint not null default 0,
     `create_at` bigint not null default 0,
     `create_by` varchar(64) not null default '',
     `update_at` bigint not null default 0,
@@ -365,6 +366,7 @@ CREATE TABLE `target` (
     `host_ip` varchar(15) default '' COMMENT 'IPv4 string',
     `agent_version` varchar(255) default '' COMMENT 'agent version',
     `engine_name` varchar(255) default '' COMMENT 'engine_name',
+    `os` VARCHAR(31) DEFAULT '' COMMENT 'os type',
     `update_at` bigint not null default 0,
     PRIMARY KEY (`id`),
     UNIQUE KEY (`ident`),
@@ -396,6 +398,7 @@ CREATE TABLE `recording_rule` (
     `disabled` tinyint(1) not null default 0 comment '0:enabled 1:disabled',
     `prom_ql` varchar(8192) not null comment 'promql',
     `prom_eval_interval` int not null comment 'evaluate interval',
+    `cron_pattern` varchar(255) default '' comment 'cron pattern',
     `append_tags` varchar(255) default '' comment 'split by space: service=n9e mod=api',
     `query_configs` text not null comment 'query configs',
     `create_at` bigint default '0',
@@ -439,7 +442,7 @@ CREATE TABLE `alert_cur_event` (
     `prom_for_duration` int not null comment 'prometheus for, unit:s',
     `prom_ql` varchar(8192) not null comment 'promql',
     `prom_eval_interval` int not null comment 'evaluate interval',
-    `callbacks` varchar(255) not null default '' comment 'split by space: http://a.com/api/x http://a.com/api/y',
+    `callbacks` varchar(2048) not null default '' comment 'split by space: http://a.com/api/x http://a.com/api/y',
     `runbook_url` varchar(255),
     `notify_recovered` tinyint(1) not null comment 'whether notify when recovery',
     `notify_channels` varchar(255) not null default '' comment 'split by space: sms voice email dingtalk wecom',
@@ -454,6 +457,7 @@ CREATE TABLE `alert_cur_event` (
     `annotations` text not null comment 'annotations',
     `rule_config` text not null comment 'annotations',
     `tags` varchar(1024) not null default '' comment 'merge data_tags rule_tags, split by ,,',
+    `original_tags` text comment 'labels key=val,,k2=v2',
     PRIMARY KEY (`id`),
     KEY (`hash`),
     KEY (`rule_id`),
@@ -479,7 +483,7 @@ CREATE TABLE `alert_his_event` (
     `prom_for_duration` int not null comment 'prometheus for, unit:s',
     `prom_ql` varchar(8192) not null comment 'promql',
     `prom_eval_interval` int not null comment 'evaluate interval',
-    `callbacks` varchar(255) not null default '' comment 'split by space: http://a.com/api/x http://a.com/api/y',
+    `callbacks` varchar(2048) not null default '' comment 'split by space: http://a.com/api/x http://a.com/api/y',
     `runbook_url` varchar(255),
     `notify_recovered` tinyint(1) not null comment 'whether notify when recovery',
     `notify_channels` varchar(255) not null default '' comment 'split by space: sms voice email dingtalk wecom',
@@ -493,6 +497,7 @@ CREATE TABLE `alert_his_event` (
     `recover_time` bigint not null default 0,
     `last_eval_time` bigint not null default 0 comment 'for time filter',
     `tags` varchar(1024) not null default '' comment 'merge data_tags rule_tags, split by ,,',
+    `original_tags` text comment 'labels key=val,,k2=v2',
     `annotations` text not null comment 'annotations',
     `rule_config` text not null comment 'annotations',
     PRIMARY KEY (`id`),
@@ -501,6 +506,58 @@ CREATE TABLE `alert_his_event` (
     KEY (`rule_id`),
     KEY (`trigger_time`, `group_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET = utf8mb4;
+
+CREATE TABLE `board_busigroup` (
+  `busi_group_id` bigint(20) NOT NULL DEFAULT '0' COMMENT 'busi group id',
+  `board_id` bigint(20) NOT NULL DEFAULT '0' COMMENT 'board id',
+  PRIMARY KEY (`busi_group_id`, `board_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `builtin_components` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '''unique identifier''',
+  `ident` varchar(191) NOT NULL COMMENT '''identifier of component''',
+  `logo` varchar(191) NOT NULL COMMENT '''logo of component''',
+  `readme` text NOT NULL COMMENT '''readme of component''',
+  `created_at` bigint(20) NOT NULL DEFAULT 0 COMMENT '''create time''',
+  `created_by` varchar(191) NOT NULL DEFAULT '' COMMENT '''creator''',
+  `updated_at` bigint(20) NOT NULL DEFAULT 0 COMMENT '''update time''',
+  `updated_by` varchar(191) NOT NULL DEFAULT '' COMMENT '''updater''',
+  PRIMARY KEY (`id`),
+  KEY `idx_ident` (`ident`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `builtin_payloads` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '''unique identifier''',
+  `uuid` bigint(20) NOT NULL COMMENT '''uuid of payload''',
+  `type` varchar(191) NOT NULL COMMENT '''type of payload''',
+  `component` varchar(191) NOT NULL COMMENT '''component of payload''',
+  `cate` varchar(191) NOT NULL COMMENT '''category of payload''',
+  `name` varchar(191) NOT NULL COMMENT '''name of payload''',
+  `tags` varchar(191) NOT NULL DEFAULT '' COMMENT '''tags of payload''',
+  `content` longtext NOT NULL COMMENT '''content of payload''',
+  `created_at` bigint(20) NOT NULL DEFAULT 0 COMMENT '''create time''',
+  `created_by` varchar(191) NOT NULL DEFAULT '' COMMENT '''creator''',
+  `updated_at` bigint(20) NOT NULL DEFAULT 0 COMMENT '''update time''',
+  `updated_by` varchar(191) NOT NULL DEFAULT '' COMMENT '''updater''',
+  PRIMARY KEY (`id`),
+  KEY `idx_component` (`component`),
+  KEY `idx_name` (`name`),
+  KEY `idx_cate` (`cate`),
+  KEY `idx_uuid` (`uuid`),
+  KEY `idx_type` (`type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE notification_record (
+    `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
+    `event_id` BIGINT NOT NULL,
+    `sub_id` BIGINT NOT NULL,
+    `channel` VARCHAR(255) NOT NULL,
+    `status` TINYINT NOT NULL DEFAULT 0,
+    `target` VARCHAR(1024) NOT NULL,
+    `details` VARCHAR(2048),
+    `created_at` BIGINT NOT NULL,
+    INDEX idx_evt (event_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE `task_tpl`
 (

@@ -16,6 +16,7 @@ import (
 	centerrt "github.com/ccfos/nightingale/v6/center/router"
 	"github.com/ccfos/nightingale/v6/center/sso"
 	"github.com/ccfos/nightingale/v6/conf"
+	"github.com/ccfos/nightingale/v6/cron"
 	"github.com/ccfos/nightingale/v6/dumper"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/models"
@@ -64,6 +65,8 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 	migrate.Migrate(db)
 	models.InitRoot(ctx)
 
+	config.HTTP.JWTAuth.SigningKey = models.InitJWTSigningKey(ctx)
+
 	err = rsa.InitRSAConfig(ctx, &config.HTTP.RSA)
 	if err != nil {
 		return nil, err
@@ -104,8 +107,10 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 
 	go version.GetGithubVersion()
 
+	go cron.CleanNotifyRecord(ctx, config.Center.CleanNotifyRecordDay)
+
 	alertrtRouter := alertrt.New(config.HTTP, config.Alert, alertMuteCache, targetCache, busiGroupCache, alertStats, ctx, externalProcessors)
-	centerRouter := centerrt.New(config.HTTP, config.Center, config.Alert, cconf.Operations, dsCache, notifyConfigCache, promClients, tdengineClients,
+	centerRouter := centerrt.New(config.HTTP, config.Center, config.Alert, config.Ibex, cconf.Operations, dsCache, notifyConfigCache, promClients, tdengineClients,
 		redis, sso, ctx, metas, idents, targetCache, userCache, userGroupCache)
 	pushgwRouter := pushgwrt.New(config.HTTP, config.Pushgw, config.Alert, targetCache, busiGroupCache, idents, metas, writers, ctx)
 

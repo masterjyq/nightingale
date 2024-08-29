@@ -9,6 +9,8 @@ import (
 	"github.com/ccfos/nightingale/v6/pkg/poster"
 
 	"github.com/pkg/errors"
+	"github.com/toolkits/pkg/container/set"
+
 	"gorm.io/gorm"
 )
 
@@ -18,13 +20,15 @@ type Target struct {
 	GroupObj     *BusiGroup        `json:"group_obj" gorm:"-"`
 	Ident        string            `json:"ident"`
 	Note         string            `json:"note"`
-	Tags         string            `json:"-"`
+	Tags         string            `json:"-"` // user tags
 	TagsJSON     []string          `json:"tags" gorm:"-"`
 	TagsMap      map[string]string `json:"tags_maps" gorm:"-"` // internal use, append tags to series
 	UpdateAt     int64             `json:"update_at"`
 	HostIp       string            `json:"host_ip"` //ipv4，do not needs range select
 	AgentVersion string            `json:"agent_version"`
 	EngineName   string            `json:"engine_name"`
+	OS           string            `json:"os" gorm:"column:os"`
+	HostTags     []string          `json:"host_tags" gorm:"serializer:json"`
 
 	UnixTime   int64   `json:"unixtime" gorm:"-"`
 	Offset     int64   `json:"offset" gorm:"-"`
@@ -32,7 +36,6 @@ type Target struct {
 	MemUtil    float64 `json:"mem_util" gorm:"-"`
 	CpuNum     int     `json:"cpu_num" gorm:"-"`
 	CpuUtil    float64 `json:"cpu_util" gorm:"-"`
-	OS         string  `json:"os" gorm:"-"`
 	Arch       string  `json:"arch" gorm:"-"`
 	RemoteAddr string  `json:"remote_addr" gorm:"-"`
 }
@@ -62,6 +65,17 @@ func (t *Target) FillGroup(ctx *ctx.Context, cache map[int64]*BusiGroup) error {
 	return nil
 }
 
+func (t *Target) AfterFind(tx *gorm.DB) (err error) {
+	delta := time.Now().Unix() - t.UpdateAt
+	if delta < 60 {
+		t.TargetUp = 2
+	} else if delta < 180 {
+		t.TargetUp = 1
+	}
+	t.FillTagsMap()
+	return
+}
+
 func TargetStatistics(ctx *ctx.Context) (*Statistics, error) {
 	if !ctx.IsCenter {
 		s, err := poster.GetByUrls[*Statistics](ctx, "/v1/n9e/statistic?name=target")
@@ -84,43 +98,69 @@ func TargetDel(ctx *ctx.Context, idents []string) error {
 	return DB(ctx).Where("ident in ?", idents).Delete(new(Target)).Error
 }
 
-func buildTargetWhere(ctx *ctx.Context, bgids []int64, dsIds []int64, query string, downtime int64) *gorm.DB {
-	session := DB(ctx).Model(&Target{})
+type BuildTargetWhereOption func(session *gorm.DB) *gorm.DB
 
-	if len(bgids) > 0 {
-		session = session.Where("group_id in (?)", bgids)
-	}
-
-	if len(dsIds) > 0 {
-		session = session.Where("datasource_id in (?)", dsIds)
-	}
-
-	if downtime > 0 {
-		session = session.Where("update_at < ?", time.Now().Unix()-downtime)
-	}
-
-	if query != "" {
-		arr := strings.Fields(query)
-		for i := 0; i < len(arr); i++ {
-			q := "%" + arr[i] + "%"
-			session = session.Where("ident like ? or note like ? or tags like ?", q, q, q)
+func BuildTargetWhereWithBgids(bgids []int64) BuildTargetWhereOption {
+	return func(session *gorm.DB) *gorm.DB {
+		if len(bgids) > 0 {
+			session = session.Where("group_id in (?)", bgids)
 		}
+		return session
 	}
+}
 
+func BuildTargetWhereWithDsIds(dsIds []int64) BuildTargetWhereOption {
+	return func(session *gorm.DB) *gorm.DB {
+		if len(dsIds) > 0 {
+			session = session.Where("datasource_id in (?)", dsIds)
+		}
+		return session
+	}
+}
+
+func BuildTargetWhereWithQuery(query string) BuildTargetWhereOption {
+	return func(session *gorm.DB) *gorm.DB {
+		if query != "" {
+			arr := strings.Fields(query)
+			for i := 0; i < len(arr); i++ {
+				q := "%" + arr[i] + "%"
+				session = session.Where("ident like ? or note like ? or tags like ? or host_tags like ?"+
+					"or os like ?", q, q, q, q, q)
+			}
+		}
+		return session
+	}
+}
+
+func BuildTargetWhereWithDowntime(downtime int64) BuildTargetWhereOption {
+	return func(session *gorm.DB) *gorm.DB {
+		if downtime > 0 {
+			session = session.Where("update_at < ?", time.Now().Unix()-downtime)
+		}
+		return session
+	}
+}
+
+func buildTargetWhere(ctx *ctx.Context, options ...BuildTargetWhereOption) *gorm.DB {
+	session := DB(ctx).Model(&Target{})
+	for _, opt := range options {
+		session = opt(session)
+	}
 	return session
 }
 
-func TargetTotalCount(ctx *ctx.Context) (int64, error) {
-	return Count(DB(ctx).Model(new(Target)))
+func TargetTotal(ctx *ctx.Context, options ...BuildTargetWhereOption) (int64, error) {
+	return Count(buildTargetWhere(ctx, options...))
 }
 
-func TargetTotal(ctx *ctx.Context, bgids []int64, dsIds []int64, query string, downtime int64) (int64, error) {
-	return Count(buildTargetWhere(ctx, bgids, dsIds, query, downtime))
-}
-
-func TargetGets(ctx *ctx.Context, bgids []int64, dsIds []int64, query string, downtime int64, limit, offset int) ([]*Target, error) {
+func TargetGets(ctx *ctx.Context, limit, offset int, order string, desc bool, options ...BuildTargetWhereOption) ([]*Target, error) {
 	var lst []*Target
-	err := buildTargetWhere(ctx, bgids, dsIds, query, downtime).Order("ident").Limit(limit).Offset(offset).Find(&lst).Error
+	if desc {
+		order += " desc"
+	} else {
+		order += " asc"
+	}
+	err := buildTargetWhere(ctx, options...).Order(order).Limit(limit).Offset(offset).Find(&lst).Error
 	if err == nil {
 		for i := 0; i < len(lst); i++ {
 			lst[i].TagsJSON = strings.Fields(lst[i].Tags)
@@ -238,15 +278,71 @@ func TargetGetByIdent(ctx *ctx.Context, ident string) (*Target, error) {
 	return TargetGet(ctx, "ident = ?", ident)
 }
 
-func TargetGetTags(ctx *ctx.Context, idents []string) ([]string, error) {
+func TargetsGetByIdents(ctx *ctx.Context, idents []string) ([]*Target, error) {
+	var targets []*Target
+	err := DB(ctx).Where("ident IN ?", idents).Find(&targets).Error
+	return targets, err
+}
+
+func TargetsGetIdentsByIdentsAndHostIps(ctx *ctx.Context, idents, hostIps []string) (map[string]string, []string, error) {
+	inexistence := make(map[string]string)
+	identSet := set.NewStringSet()
+
+	// Query the ident corresponding to idents
+	if len(idents) > 0 {
+		var identsFromIdents []string
+		err := DB(ctx).Model(&Target{}).Where("ident IN ?", idents).Pluck("ident", &identsFromIdents).Error
+		if err != nil {
+			return nil, nil, err
+		}
+
+		for _, ident := range identsFromIdents {
+			identSet.Add(ident)
+		}
+
+		for _, ident := range idents {
+			if !identSet.Exists(ident) {
+				inexistence[ident] = "Ident not found"
+			}
+		}
+	}
+
+	// Query the hostIp corresponding to idents
+	if len(hostIps) > 0 {
+		var hostIpToIdentMap []struct {
+			HostIp string
+			Ident  string
+		}
+		err := DB(ctx).Model(&Target{}).Select("host_ip, ident").Where("host_ip IN ?", hostIps).Scan(&hostIpToIdentMap).Error
+		if err != nil {
+			return nil, nil, err
+		}
+
+		hostIpToIdent := set.NewStringSet()
+		for _, entry := range hostIpToIdentMap {
+			hostIpToIdent.Add(entry.HostIp)
+			identSet.Add(entry.Ident)
+		}
+
+		for _, hostIp := range hostIps {
+			if !hostIpToIdent.Exists(hostIp) {
+				inexistence[hostIp] = "HostIp not found"
+			}
+		}
+	}
+
+	return inexistence, identSet.ToSlice(), nil
+}
+
+func TargetGetTags(ctx *ctx.Context, idents []string, ignoreHostTag bool) ([]string, error) {
 	session := DB(ctx).Model(new(Target))
 
-	var arr []string
+	var arr []*Target
 	if len(idents) > 0 {
 		session = session.Where("ident in ?", idents)
 	}
 
-	err := session.Select("distinct(tags) as tags").Pluck("tags", &arr).Error
+	err := session.Select("tags", "host_tags").Find(&arr).Error
 	if err != nil {
 		return nil, err
 	}
@@ -258,9 +354,15 @@ func TargetGetTags(ctx *ctx.Context, idents []string) ([]string, error) {
 
 	set := make(map[string]struct{})
 	for i := 0; i < cnt; i++ {
-		tags := strings.Fields(arr[i])
+		tags := strings.Fields(arr[i].Tags)
 		for j := 0; j < len(tags); j++ {
 			set[tags[j]] = struct{}{}
+		}
+
+		if !ignoreHostTag {
+			for _, ht := range arr[i].HostTags {
+				set[ht] = struct{}{}
+			}
 		}
 	}
 
@@ -292,8 +394,8 @@ func (t *Target) AddTags(ctx *ctx.Context, tags []string) error {
 }
 
 func (t *Target) DelTags(ctx *ctx.Context, tags []string) error {
-	for i := 0; i < len(tags); i++ {
-		t.Tags = strings.ReplaceAll(t.Tags, tags[i]+" ", "")
+	for _, tag := range tags {
+		t.Tags = strings.ReplaceAll(t.Tags, tag+" ", "")
 	}
 
 	return DB(ctx).Model(t).Updates(map[string]interface{}{
@@ -306,7 +408,8 @@ func (t *Target) FillTagsMap() {
 	t.TagsJSON = strings.Fields(t.Tags)
 	t.TagsMap = make(map[string]string)
 	m := make(map[string]string)
-	for _, item := range t.TagsJSON {
+	allTags := append(t.TagsJSON, t.HostTags...)
+	for _, item := range allTags {
 		arr := strings.Split(item, "=")
 		if len(arr) != 2 {
 			continue
@@ -321,6 +424,16 @@ func (t *Target) GetTagsMap() map[string]string {
 	tagsJSON := strings.Fields(t.Tags)
 	m := make(map[string]string)
 	for _, item := range tagsJSON {
+		if arr := strings.Split(item, "="); len(arr) == 2 {
+			m[arr[0]] = arr[1]
+		}
+	}
+	return m
+}
+
+func (t *Target) GetHostTagsMap() map[string]string {
+	m := make(map[string]string)
+	for _, item := range t.HostTags {
 		arr := strings.Split(item, "=")
 		if len(arr) != 2 {
 			continue
@@ -336,7 +449,6 @@ func (t *Target) FillMeta(meta *HostMeta) {
 	t.CpuNum = meta.CpuNum
 	t.UnixTime = meta.UnixTime
 	t.Offset = meta.Offset
-	t.OS = meta.OS
 	t.Arch = meta.Arch
 	t.RemoteAddr = meta.RemoteAddr
 }

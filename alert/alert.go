@@ -53,7 +53,7 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 	alertStats := astats.NewSyncStats()
 
 	configCache := memsto.NewConfigCache(ctx, syncStats, nil, "")
-	targetCache := memsto.NewTargetCache(ctx, syncStats, nil)
+	targetCache := memsto.NewTargetCache(ctx, syncStats, redis)
 	busiGroupCache := memsto.NewBusiGroupCache(ctx, syncStats)
 	alertMuteCache := memsto.NewAlertMuteCache(ctx, syncStats)
 	alertRuleCache := memsto.NewAlertRuleCache(ctx, syncStats)
@@ -106,11 +106,11 @@ func Start(alertc aconf.Alert, pushgwc pconf.Pushgw, syncStats *memsto.Stats, al
 		busiGroupCache, alertMuteCache, datasourceCache, promClients, tdendgineClients, naming, ctx, alertStats)
 
 	dp := dispatch.NewDispatch(alertRuleCache, userCache, userGroupCache, alertSubscribeCache, targetCache, notifyConfigCache, taskTplsCache, alertc.Alerting, ctx, alertStats)
-	consumer := dispatch.NewConsumer(alertc.Alerting, ctx, dp)
+	consumer := dispatch.NewConsumer(alertc.Alerting, ctx, dp, promClients)
 
 	go dp.ReloadTpls()
 	go consumer.LoopConsume()
 
 	go queue.ReportQueueSize(alertStats)
-	go sender.InitEmailSender(notifyConfigCache)
+	go sender.InitEmailSender(ctx, notifyConfigCache)
 }

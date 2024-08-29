@@ -13,6 +13,7 @@ import (
 	"github.com/ccfos/nightingale/v6/center/cstats"
 	"github.com/ccfos/nightingale/v6/center/metas"
 	"github.com/ccfos/nightingale/v6/center/sso"
+	"github.com/ccfos/nightingale/v6/conf"
 	_ "github.com/ccfos/nightingale/v6/front/statik"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/pkg/aop"
@@ -34,6 +35,7 @@ import (
 type Router struct {
 	HTTP              httpx.Config
 	Center            cconf.Center
+	Ibex              conf.Ibex
 	Alert             aconf.Alert
 	Operations        cconf.Operation
 	DatasourceCache   *memsto.DatasourceCacheType
@@ -48,13 +50,15 @@ type Router struct {
 	UserCache         *memsto.UserCacheType
 	UserGroupCache    *memsto.UserGroupCacheType
 	Ctx               *ctx.Context
+	HeartbeatHook     HeartbeatHookFunc
 }
 
-func New(httpConfig httpx.Config, center cconf.Center, alert aconf.Alert, operations cconf.Operation, ds *memsto.DatasourceCacheType, ncc *memsto.NotifyConfigCacheType, pc *prom.PromClientMap, tdendgineClients *tdengine.TdengineClientMap, redis storage.Redis, sso *sso.SsoClient, ctx *ctx.Context, metaSet *metas.Set, idents *idents.Set, tc *memsto.TargetCacheType, uc *memsto.UserCacheType, ugc *memsto.UserGroupCacheType) *Router {
+func New(httpConfig httpx.Config, center cconf.Center, alert aconf.Alert, ibex conf.Ibex, operations cconf.Operation, ds *memsto.DatasourceCacheType, ncc *memsto.NotifyConfigCacheType, pc *prom.PromClientMap, tdendgineClients *tdengine.TdengineClientMap, redis storage.Redis, sso *sso.SsoClient, ctx *ctx.Context, metaSet *metas.Set, idents *idents.Set, tc *memsto.TargetCacheType, uc *memsto.UserCacheType, ugc *memsto.UserGroupCacheType) *Router {
 	return &Router{
 		HTTP:              httpConfig,
 		Center:            center,
 		Alert:             alert,
+		Ibex:              ibex,
 		Operations:        operations,
 		DatasourceCache:   ds,
 		NotifyConfigCache: ncc,
@@ -68,6 +72,7 @@ func New(httpConfig httpx.Config, center cconf.Center, alert aconf.Alert, operat
 		UserCache:         uc,
 		UserGroupCache:    ugc,
 		Ctx:               ctx,
+		HeartbeatHook:     func(ident string) map[string]interface{} { return nil },
 	}
 }
 
@@ -91,7 +96,9 @@ func languageDetector(i18NHeaderKey string) gin.HandlerFunc {
 		if headerKey != "" {
 			lang := c.GetHeader(headerKey)
 			if lang != "" {
-				if strings.HasPrefix(lang, "zh") {
+				if strings.HasPrefix(lang, "zh_HK") {
+					c.Request.Header.Set("X-Language", "zh_HK")
+				} else if strings.HasPrefix(lang, "zh") {
 					c.Request.Header.Set("X-Language", "zh_CN")
 				} else if strings.HasPrefix(lang, "en") {
 					c.Request.Header.Set("X-Language", "en")
@@ -112,7 +119,7 @@ func (rt *Router) configNoRoute(r *gin.Engine, fs *http.FileSystem) {
 		suffix := arr[len(arr)-1]
 
 		switch suffix {
-		case "png", "jpeg", "jpg", "svg", "ico", "gif", "css", "js", "html", "htm", "gz", "zip", "map", "ttf":
+		case "png", "jpeg", "jpg", "svg", "ico", "gif", "css", "js", "html", "htm", "gz", "zip", "map", "ttf", "md":
 			if !rt.Center.UseFileAssets {
 				c.FileFromFS(c.Request.URL.Path, *fs)
 			} else {
@@ -274,13 +281,14 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.POST("/builtin-cate-favorite", rt.auth(), rt.user(), rt.builtinCateFavoriteAdd)
 		pages.DELETE("/builtin-cate-favorite/:name", rt.auth(), rt.user(), rt.builtinCateFavoriteDel)
 
-		pages.GET("/builtin-boards", rt.builtinBoardGets)
-		pages.GET("/builtin-board/:name", rt.builtinBoardGet)
-		pages.GET("/dashboards/builtin/list", rt.builtinBoardGets)
-		pages.GET("/builtin-boards-cates", rt.auth(), rt.user(), rt.builtinBoardCateGets)
-		pages.POST("/builtin-boards-detail", rt.auth(), rt.user(), rt.builtinBoardDetailGets)
 		pages.GET("/integrations/icon/:cate/:name", rt.builtinIcon)
-		pages.GET("/integrations/makedown/:cate", rt.builtinMarkdown)
+
+		// pages.GET("/builtin-boards", rt.builtinBoardGets)
+		// pages.GET("/builtin-board/:name", rt.builtinBoardGet)
+		// pages.GET("/dashboards/builtin/list", rt.builtinBoardGets)
+		// pages.GET("/builtin-boards-cates", rt.auth(), rt.user(), rt.builtinBoardCateGets)
+		// pages.POST("/builtin-boards-detail", rt.auth(), rt.user(), rt.builtinBoardDetailGets)
+		// pages.GET("/integrations/makedown/:cate", rt.builtinMarkdown)
 
 		pages.GET("/busi-groups/public-boards", rt.auth(), rt.user(), rt.perm("/dashboards"), rt.publicBoardGets)
 		pages.GET("/busi-groups/boards", rt.auth(), rt.user(), rt.perm("/dashboards"), rt.boardGetsByGids)
@@ -299,19 +307,24 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/share-charts", rt.chartShareGets)
 		pages.POST("/share-charts", rt.auth(), rt.chartShareAdd)
 
-		pages.GET("/alert-rules/builtin/alerts-cates", rt.auth(), rt.user(), rt.builtinAlertCateGets)
-		pages.GET("/alert-rules/builtin/list", rt.auth(), rt.user(), rt.builtinAlertRules)
+		// pages.GET("/alert-rules/builtin/alerts-cates", rt.auth(), rt.user(), rt.builtinAlertCateGets)
+		// pages.GET("/alert-rules/builtin/list", rt.auth(), rt.user(), rt.builtinAlertRules)
 		pages.GET("/alert-rules/callbacks", rt.auth(), rt.user(), rt.alertRuleCallbacks)
 
 		pages.GET("/busi-groups/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGetsByGids)
 		pages.GET("/busi-group/:id/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGets)
 		pages.POST("/busi-group/:id/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.alertRuleAddByFE)
 		pages.POST("/busi-group/:id/alert-rules/import", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.alertRuleAddByImport)
+		pages.POST("/busi-group/:id/alert-rules/import-prom-rule", rt.auth(),
+			rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.alertRuleAddByImportPromRule)
 		pages.DELETE("/busi-group/:id/alert-rules", rt.auth(), rt.user(), rt.perm("/alert-rules/del"), rt.bgrw(), rt.alertRuleDel)
 		pages.PUT("/busi-group/:id/alert-rules/fields", rt.auth(), rt.user(), rt.perm("/alert-rules/put"), rt.bgrw(), rt.alertRulePutFields)
 		pages.PUT("/busi-group/:id/alert-rule/:arid", rt.auth(), rt.user(), rt.perm("/alert-rules/put"), rt.alertRulePutByFE)
 		pages.GET("/alert-rule/:arid", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRuleGet)
+		pages.GET("/alert-rule/:arid/pure", rt.auth(), rt.user(), rt.perm("/alert-rules"), rt.alertRulePureGet)
 		pages.PUT("/busi-group/alert-rule/validate", rt.auth(), rt.user(), rt.perm("/alert-rules/put"), rt.alertRuleValidation)
+		pages.POST("/relabel-test", rt.auth(), rt.user(), rt.relabelTest)
+		pages.POST("/busi-group/:id/alert-rules/clone", rt.auth(), rt.user(), rt.perm("/alert-rules/post"), rt.bgrw(), rt.cloneToMachine)
 
 		pages.GET("/busi-groups/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGetsByGids)
 		pages.GET("/busi-group/:id/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGets)
@@ -340,16 +353,18 @@ func (rt *Router) Config(r *gin.Engine) {
 		if rt.Center.AnonymousAccess.AlertDetail {
 			pages.GET("/alert-cur-event/:eid", rt.alertCurEventGet)
 			pages.GET("/alert-his-event/:eid", rt.alertHisEventGet)
+			pages.GET("/event-notify-records/:eid", rt.notificationRecordList)
 		} else {
-			pages.GET("/alert-cur-event/:eid", rt.auth(), rt.alertCurEventGet)
-			pages.GET("/alert-his-event/:eid", rt.auth(), rt.alertHisEventGet)
+			pages.GET("/alert-cur-event/:eid", rt.auth(), rt.user(), rt.alertCurEventGet)
+			pages.GET("/alert-his-event/:eid", rt.auth(), rt.user(), rt.alertHisEventGet)
+			pages.GET("/event-notify-records/:eid", rt.auth(), rt.user(), rt.notificationRecordList)
 		}
 
 		// card logic
-		pages.GET("/alert-cur-events/list", rt.auth(), rt.alertCurEventsList)
-		pages.GET("/alert-cur-events/card", rt.auth(), rt.alertCurEventsCard)
+		pages.GET("/alert-cur-events/list", rt.auth(), rt.user(), rt.alertCurEventsList)
+		pages.GET("/alert-cur-events/card", rt.auth(), rt.user(), rt.alertCurEventsCard)
 		pages.POST("/alert-cur-events/card/details", rt.auth(), rt.alertCurEventsCardDetails)
-		pages.GET("/alert-his-events/list", rt.auth(), rt.alertHisEventsList)
+		pages.GET("/alert-his-events/list", rt.auth(), rt.user(), rt.alertHisEventsList)
 		pages.DELETE("/alert-cur-events", rt.auth(), rt.user(), rt.perm("/alert-cur-events/del"), rt.alertCurEventDel)
 		pages.GET("/alert-cur-events/stats", rt.auth(), rt.alertCurEventsStatistics)
 
@@ -371,8 +386,8 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/busi-group/:id/tasks", rt.auth(), rt.user(), rt.perm("/job-tasks"), rt.bgro(), rt.taskGets)
 		pages.POST("/busi-group/:id/tasks", rt.auth(), rt.user(), rt.perm("/job-tasks/add"), rt.bgrw(), rt.taskAdd)
 
-		pages.GET("/servers", rt.auth(), rt.user(), rt.perm("/help/servers"), rt.serversGet)
-		pages.GET("/server-clusters", rt.auth(), rt.user(), rt.perm("/help/servers"), rt.serverClustersGet)
+		pages.GET("/servers", rt.auth(), rt.user(), rt.serversGet)
+		pages.GET("/server-clusters", rt.auth(), rt.user(), rt.serverClustersGet)
 
 		pages.POST("/datasource/list", rt.auth(), rt.user(), rt.datasourceList)
 		pages.POST("/datasource/plugin/list", rt.auth(), rt.pluginList)
@@ -422,6 +437,9 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternPut)
 		pages.DELETE("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternDel)
 
+		pages.GET("/embedded-dashboards", rt.auth(), rt.user(), rt.perm("/embedded-dashboards"), rt.embeddedDashboardsGet)
+		pages.PUT("/embedded-dashboards", rt.auth(), rt.user(), rt.perm("/embedded-dashboards/put"), rt.embeddedDashboardsPut)
+
 		pages.GET("/user-variable-configs", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigGets)
 		pages.POST("/user-variable-config", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigAdd)
 		pages.PUT("/user-variable-config/:id", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigPut)
@@ -434,16 +452,17 @@ func (rt *Router) Config(r *gin.Engine) {
 		// for admin api
 		pages.GET("/user/busi-groups", rt.auth(), rt.admin(), rt.userBusiGroupsGets)
 
-		pages.POST("/builtin-components", rt.auth(), rt.user(), rt.perm("/builtin-components/add"), rt.builtinComponentsAdd)
-		pages.GET("/builtin-components", rt.auth(), rt.user(), rt.perm("/builtin-components"), rt.builtinComponentsGets)
-		pages.PUT("/builtin-components", rt.auth(), rt.user(), rt.perm("/builtin-components/put"), rt.builtinComponentsPut)
-		pages.DELETE("/builtin-components", rt.auth(), rt.user(), rt.perm("/builtin-components/del"), rt.builtinComponentsDel)
+		pages.GET("/builtin-components", rt.auth(), rt.user(), rt.builtinComponentsGets)
+		pages.POST("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/add"), rt.builtinComponentsAdd)
+		pages.PUT("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/put"), rt.builtinComponentsPut)
+		pages.DELETE("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinComponentsDel)
 
-		pages.POST("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/builtin-payloads/add"), rt.builtinPayloadsAdd)
-		pages.GET("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/builtin-payloads"), rt.builtinPayloadsGets)
-		pages.GET("/builtin-payload/:id", rt.auth(), rt.user(), rt.perm("/builtin-payloads"), rt.builtinPayloadGet)
-		pages.PUT("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/builtin-payloads/put"), rt.builtinPayloadsPut)
-		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/builtin-payloads/del"), rt.builtinPayloadsDel)
+		pages.GET("/builtin-payloads", rt.auth(), rt.user(), rt.builtinPayloadsGets)
+		pages.GET("/builtin-payloads/cates", rt.auth(), rt.user(), rt.builtinPayloadcatesGet)
+		pages.POST("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/add"), rt.builtinPayloadsAdd)
+		pages.GET("/builtin-payload/:id", rt.auth(), rt.user(), rt.perm("/built-in-components"), rt.builtinPayloadGet)
+		pages.PUT("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/put"), rt.builtinPayloadsPut)
+		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinPayloadsDel)
 	}
 
 	r.GET("/api/n9e/versions", func(c *gin.Context) {
@@ -477,10 +496,14 @@ func (rt *Router) Config(r *gin.Engine) {
 			service.GET("/user-group-members", rt.userGroupMemberGetsByService)
 
 			service.GET("/targets", rt.targetGetsByService)
+			service.GET("/target/extra-meta", rt.targetExtendInfoByIdent)
+			service.POST("/target/list", rt.targetGetsByHostFilter)
+			service.DELETE("/targets", rt.targetDelByService)
 			service.GET("/targets/tags", rt.targetGetTags)
 			service.POST("/targets/tags", rt.targetBindTagsByService)
 			service.DELETE("/targets/tags", rt.targetUnbindTagsByService)
 			service.PUT("/targets/note", rt.targetUpdateNoteByService)
+			service.PUT("/targets/bgid", rt.targetUpdateBgidByService)
 
 			service.POST("/alert-rules", rt.alertRuleAddByService)
 			service.POST("/alert-rule-add", rt.alertRuleAddOneByService)
@@ -533,6 +556,9 @@ func (rt *Router) Config(r *gin.Engine) {
 
 			service.GET("/targets-of-alert-rule", rt.targetsOfAlertRule)
 
+			service.POST("/notify-record", rt.notificationRecordAdd)
+
+			service.GET("/alert-cur-events-del-by-hash", rt.alertCurEventDelByHash)
 		}
 	}
 
