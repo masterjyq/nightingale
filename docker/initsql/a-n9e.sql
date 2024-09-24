@@ -453,7 +453,7 @@ CREATE TABLE `alert_cur_event` (
     `target_note` varchar(191) not null default '' comment 'target note',
     `first_trigger_time` bigint,
     `trigger_time` bigint not null,
-    `trigger_value` varchar(255) not null,
+    `trigger_value` text not null,
     `annotations` text not null comment 'annotations',
     `rule_config` text not null comment 'annotations',
     `tags` varchar(1024) not null default '' comment 'merge data_tags rule_tags, split by ,,',
@@ -493,7 +493,7 @@ CREATE TABLE `alert_his_event` (
     `target_note` varchar(191) not null default '' comment 'target note',
     `first_trigger_time` bigint,
     `trigger_time` bigint not null,
-    `trigger_value` varchar(255) not null,
+    `trigger_value` text not null,
     `recover_time` bigint not null default 0,
     `last_eval_time` bigint not null default 0 comment 'for time filter',
     `tags` varchar(1024) not null default '' comment 'merge data_tags rule_tags, split by ,,',
@@ -528,6 +528,7 @@ CREATE TABLE `builtin_components` (
 
 CREATE TABLE `builtin_payloads` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '''unique identifier''',
+  `component_id` bigint(20) NOT NULL DEFAULT 0 COMMENT 'component_id',
   `uuid` bigint(20) NOT NULL COMMENT '''uuid of payload''',
   `type` varchar(191) NOT NULL COMMENT '''type of payload''',
   `component` varchar(191) NOT NULL COMMENT '''component of payload''',

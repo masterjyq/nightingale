@@ -212,6 +212,14 @@ func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, no
 	event.ExtraConfig = p.rule.ExtraConfigJSON
 	event.PromQl = anomalyPoint.Query
 
+	if p.target != "" {
+		if pt, exist := p.TargetCache.Get(p.target); exist {
+			event.Target = pt
+		} else {
+			logger.Infof("Target[ident: %s] doesn't exist in cache.", p.target)
+		}
+	}
+
 	if event.TriggerValues != "" && strings.Count(event.TriggerValues, "$") > 1 {
 		// TriggerValues 有多个变量，将多个变量都放到 TriggerValue 中
 		event.TriggerValue = event.TriggerValues
@@ -497,6 +505,7 @@ func (p *Processor) pushEventToQueue(e *models.AlertCurEvent) {
 
 func (p *Processor) RecoverAlertCurEventFromDb() {
 	p.pendings = NewAlertCurEventMap(nil)
+	p.pendingsUseByRecover = NewAlertCurEventMap(nil)
 
 	curEvents, err := models.AlertCurEventGetByRuleIdAndDsId(p.ctx, p.rule.Id, p.datasourceId)
 	if err != nil {
@@ -518,6 +527,11 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 		}
 
 		event.DB2Mem()
+		target, exists := p.TargetCache.Get(event.TargetIdent)
+		if exists {
+			event.Target = target
+		}
+
 		fireMap[event.Hash] = event
 		e := *event
 		pendingsUseByRecoverMap[event.Hash] = &e
