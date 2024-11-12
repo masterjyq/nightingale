@@ -48,6 +48,10 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 
 	cconf.MergeOperationConf()
 
+	if config.Alert.Heartbeat.EngineName == "" {
+		config.Alert.Heartbeat.EngineName = "default"
+	}
+
 	logxClean, err := logx.Init(config.Log)
 	if err != nil {
 		return nil, err
@@ -72,7 +76,7 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 		return nil, err
 	}
 
-	integration.Init(ctx, config.Center.BuiltinIntegrationsDir)
+	go integration.Init(ctx, config.Center.BuiltinIntegrationsDir)
 	var redis storage.Redis
 	redis, err = storage.NewRedis(config.Redis)
 	if err != nil {
@@ -95,6 +99,7 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 	userCache := memsto.NewUserCache(ctx, syncStats)
 	userGroupCache := memsto.NewUserGroupCache(ctx, syncStats)
 	taskTplCache := memsto.NewTaskTplCache(ctx)
+	configCvalCache := memsto.NewCvalCache(ctx, syncStats)
 
 	sso := sso.Init(config.Center, ctx, configCache)
 	promClients := prom.NewPromClient(ctx)
@@ -115,12 +120,13 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 		redis, sso, ctx, metas, idents, targetCache, userCache, userGroupCache)
 	pushgwRouter := pushgwrt.New(config.HTTP, config.Pushgw, config.Alert, targetCache, busiGroupCache, idents, metas, writers, ctx)
 
-	models.MigrateBg(ctx, pushgwRouter.Pushgw.BusiGroupLabelKey)
-	if config.Center.MigrateBusiGroupLabel {
-		models.DoMigrateBg(ctx, config.Pushgw.BusiGroupLabelKey)
-	}
+	go func() {
+		if models.CanMigrateBg(ctx) {
+			models.MigrateBg(ctx, pushgwRouter.Pushgw.BusiGroupLabelKey)
+		}
+	}()
 
-	r := httpx.GinEngine(config.Global.RunMode, config.HTTP)
+	r := httpx.GinEngine(config.Global.RunMode, config.HTTP, configCvalCache.PrintBodyPaths, configCvalCache.PrintAccessLog)
 
 	centerRouter.Config(r)
 	alertrtRouter.Config(r)

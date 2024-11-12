@@ -16,6 +16,7 @@ import (
 	"github.com/ccfos/nightingale/v6/conf"
 	_ "github.com/ccfos/nightingale/v6/front/statik"
 	"github.com/ccfos/nightingale/v6/memsto"
+	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/aop"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/httpx"
@@ -51,6 +52,7 @@ type Router struct {
 	UserGroupCache    *memsto.UserGroupCacheType
 	Ctx               *ctx.Context
 	HeartbeatHook     HeartbeatHookFunc
+	TargetDeleteHook  models.TargetDeleteHookFunc
 }
 
 func New(httpConfig httpx.Config, center cconf.Center, alert aconf.Alert, ibex conf.Ibex,
@@ -77,7 +79,12 @@ func New(httpConfig httpx.Config, center cconf.Center, alert aconf.Alert, ibex c
 		UserGroupCache:    ugc,
 		Ctx:               ctx,
 		HeartbeatHook:     func(ident string) map[string]interface{} { return nil },
+		TargetDeleteHook:  emptyDeleteHook,
 	}
+}
+
+func emptyDeleteHook(ctx *ctx.Context, idents []string) error {
+	return nil
 }
 
 func stat() gin.HandlerFunc {
@@ -468,6 +475,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/builtin-payload/:id", rt.auth(), rt.user(), rt.perm("/built-in-components"), rt.builtinPayloadGet)
 		pages.PUT("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/put"), rt.builtinPayloadsPut)
 		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinPayloadsDel)
+		pages.GET("/builtin-payload", rt.auth(), rt.user(), rt.builtinPayloadsGetByUUIDOrID)
 	}
 
 	r.GET("/api/n9e/versions", func(c *gin.Context) {
@@ -544,6 +552,7 @@ func (rt *Router) Config(r *gin.Engine) {
 			service.GET("/config/:id", rt.configGet)
 			service.GET("/configs", rt.configsGet)
 			service.GET("/config", rt.configGetByKey)
+			service.GET("/all-configs", rt.configGetAll)
 			service.PUT("/configs", rt.configsPut)
 			service.POST("/configs", rt.configsPost)
 			service.DELETE("/configs", rt.configsDel)

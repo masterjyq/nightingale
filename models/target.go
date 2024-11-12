@@ -1,19 +1,22 @@
 package models
 
 import (
-	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/poster"
+	"golang.org/x/exp/slices"
 
 	"github.com/pkg/errors"
 	"github.com/toolkits/pkg/container/set"
 
 	"gorm.io/gorm"
 )
+
+type TargetDeleteHookFunc func(ctx *ctx.Context, idents []string) error
 
 type Target struct {
 	Id           int64             `json:"id" gorm:"primaryKey"`
@@ -31,15 +34,16 @@ type Target struct {
 	OS           string            `json:"os" gorm:"column:os"`
 	HostTags     []string          `json:"host_tags" gorm:"serializer:json"`
 
-	UnixTime   int64   `json:"unixtime" gorm:"-"`
-	Offset     int64   `json:"offset" gorm:"-"`
-	TargetUp   float64 `json:"target_up" gorm:"-"`
-	MemUtil    float64 `json:"mem_util" gorm:"-"`
-	CpuNum     int     `json:"cpu_num" gorm:"-"`
-	CpuUtil    float64 `json:"cpu_util" gorm:"-"`
-	Arch       string  `json:"arch" gorm:"-"`
-	RemoteAddr string  `json:"remote_addr" gorm:"-"`
-	GroupIds   []int64 `json:"group_ids" gorm:"-"`
+	UnixTime   int64    `json:"unixtime" gorm:"-"`
+	Offset     int64    `json:"offset" gorm:"-"`
+	TargetUp   float64  `json:"target_up" gorm:"-"`
+	MemUtil    float64  `json:"mem_util" gorm:"-"`
+	CpuNum     int      `json:"cpu_num" gorm:"-"`
+	CpuUtil    float64  `json:"cpu_util" gorm:"-"`
+	Arch       string   `json:"arch" gorm:"-"`
+	RemoteAddr string   `json:"remote_addr" gorm:"-"`
+	GroupIds   []int64  `json:"group_ids" gorm:"-"`
+	GroupNames []string `json:"group_names" gorm:"-"`
 }
 
 func (t *Target) TableName() string {
@@ -58,7 +62,7 @@ func (t *Target) FillGroup(ctx *ctx.Context, cache map[int64]*BusiGroup) error {
 
 	for _, gid := range t.GroupIds {
 		bg, has := cache[gid]
-		if has {
+		if has && bg != nil {
 			t.GroupObjs = append(t.GroupObjs, bg)
 			continue
 		}
@@ -66,6 +70,10 @@ func (t *Target) FillGroup(ctx *ctx.Context, cache map[int64]*BusiGroup) error {
 		bg, err := BusiGroupGetById(ctx, gid)
 		if err != nil {
 			return errors.WithMessage(err, "failed to get busi group")
+		}
+
+		if bg == nil {
+			continue
 		}
 
 		t.GroupObjs = append(t.GroupObjs, bg)
@@ -112,11 +120,26 @@ func TargetStatistics(ctx *ctx.Context) (*Statistics, error) {
 	return stats[0], nil
 }
 
-func TargetDel(ctx *ctx.Context, idents []string) error {
+func TargetDel(ctx *ctx.Context, idents []string, deleteHook TargetDeleteHookFunc) error {
 	if len(idents) == 0 {
 		panic("idents empty")
 	}
-	return DB(ctx).Where("ident in ?", idents).Delete(new(Target)).Error
+
+	return DB(ctx).Transaction(func(tx *gorm.DB) error {
+		txErr := tx.Where("ident in ?", idents).Delete(new(Target)).Error
+		if txErr != nil {
+			return txErr
+		}
+		txErr = deleteHook(ctx, idents)
+		if txErr != nil {
+			return txErr
+		}
+		txErr = TargetDeleteBgids(ctx, idents)
+		if txErr != nil {
+			return txErr
+		}
+		return nil
+	})
 }
 
 type BuildTargetWhereOption func(session *gorm.DB) *gorm.DB
@@ -127,8 +150,13 @@ func BuildTargetWhereWithBgids(bgids []int64) BuildTargetWhereOption {
 			session = session.Joins("left join target_busi_group on target.ident = " +
 				"target_busi_group.target_ident").Where("target_busi_group.target_ident is null")
 		} else if len(bgids) > 0 {
-			session = session.Joins("join target_busi_group on target.ident = "+
-				"target_busi_group.target_ident").Where("target_busi_group.group_id in (?)", bgids)
+			if slices.Contains(bgids, 0) {
+				session = session.Joins("left join target_busi_group on target.ident = target_busi_group.target_ident").
+					Where("target_busi_group.target_ident is null OR target_busi_group.group_id in (?)", bgids)
+			} else {
+				session = session.Joins("join target_busi_group on target.ident = "+
+					"target_busi_group.target_ident").Where("target_busi_group.group_id in (?)", bgids)
+			}
 		}
 		return session
 	}
@@ -536,33 +564,53 @@ func (m *Target) UpdateFieldsMap(ctx *ctx.Context, fields map[string]interface{}
 	return DB(ctx).Model(m).Updates(fields).Error
 }
 
-func MigrateBg(ctx *ctx.Context, bgLabelKey string) {
-	// 1. 判断是否已经完成迁移
+// 1. 是否可以进行 busi_group 迁移
+func CanMigrateBg(ctx *ctx.Context) bool {
+	// 1.1 检查 target 表是否为空
 	var cnt int64
-	if err := DB(ctx).Model(&TargetBusiGroup{}).Count(&cnt).Error; err != nil {
-		fmt.Println("Failed to count target_busi_group, err:", err)
-		return
+	if err := DB(ctx).Model(&Target{}).Count(&cnt).Error; err != nil {
+		log.Println("failed to get target table count, err:", err)
+		return false
 	}
-	if cnt > 0 {
-		fmt.Println("Migration has been completed.")
+	if cnt == 0 {
+		log.Println("target table is empty, skip migration.")
+		return false
+	}
+
+	// 1.2 判断是否已经完成迁移
+	var maxGroupId int64
+	if err := DB(ctx).Model(&Target{}).Select("MAX(group_id)").Scan(&maxGroupId).Error; err != nil {
+		log.Println("failed to get max group_id from target table, err:", err)
+		return false
+	}
+
+	if maxGroupId == 0 {
+		return false
+	}
+
+	return true
+}
+
+func MigrateBg(ctx *ctx.Context, bgLabelKey string) {
+	err := DoMigrateBg(ctx, bgLabelKey)
+	if err != nil {
+		log.Println("failed to migrate bgid, err:", err)
 		return
 	}
 
-	DoMigrateBg(ctx, bgLabelKey)
+	log.Println("migration bgid has been completed")
 }
 
 func DoMigrateBg(ctx *ctx.Context, bgLabelKey string) error {
 	// 2. 获取全量 target
 	targets, err := TargetGetsAll(ctx)
 	if err != nil {
-		fmt.Println("Failed to get target, err:", err)
 		return err
 	}
 
 	// 3. 获取全量 busi_group
 	bgs, err := BusiGroupGetAll(ctx)
 	if err != nil {
-		fmt.Println("Failed to get bg, err:", err)
 		return err
 	}
 
@@ -594,7 +642,7 @@ func DoMigrateBg(ctx *ctx.Context, bgLabelKey string) error {
 			}
 		})
 		if err != nil {
-			fmt.Println("Failed to migrate bg, err:", err)
+			log.Printf("failed to migrate %v bg, err: %v\n", t.Ident, err)
 			continue
 		}
 	}
