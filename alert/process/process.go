@@ -126,7 +126,7 @@ func NewProcessor(engineName string, rule *models.AlertRule, datasourceId int64,
 	return p
 }
 
-func (p *Processor) Handle(anomalyPoints []common.AnomalyPoint, from string, inhibit bool) {
+func (p *Processor) Handle(anomalyPoints []models.AnomalyPoint, from string, inhibit bool) {
 	// 有可能rule的一些配置已经发生变化，比如告警接收人、callbacks等
 	// 这些信息的修改是不会引起worker restart的，但是确实会影响告警处理逻辑
 	// 所以，这里直接从memsto.AlertRuleCache中获取并覆盖
@@ -134,7 +134,7 @@ func (p *Processor) Handle(anomalyPoints []common.AnomalyPoint, from string, inh
 	cachedRule := p.alertRuleCache.Get(p.rule.Id)
 	if cachedRule == nil {
 		logger.Errorf("rule not found %+v", anomalyPoints)
-		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "handle_event").Inc()
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "handle_event", p.BusiGroupCache.GetNameByBusiGroupId(p.rule.GroupId), fmt.Sprintf("%v", p.rule.Id)).Inc()
 		return
 	}
 
@@ -178,7 +178,7 @@ func (p *Processor) Handle(anomalyPoints []common.AnomalyPoint, from string, inh
 	}
 }
 
-func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, now int64, ruleHash string) *models.AlertCurEvent {
+func (p *Processor) BuildEvent(anomalyPoint models.AnomalyPoint, from string, now int64, ruleHash string) *models.AlertCurEvent {
 	p.fillTags(anomalyPoint)
 	p.mayHandleIdent()
 	hash := Hash(p.rule.Id, p.datasourceId, anomalyPoint)
@@ -204,6 +204,7 @@ func (p *Processor) BuildEvent(anomalyPoint common.AnomalyPoint, from string, no
 	event.TargetNote = p.targetNote
 	event.TriggerValue = anomalyPoint.ReadableValue()
 	event.TriggerValues = anomalyPoint.Values
+	event.TriggerValuesJson = models.EventTriggerValues{ValuesWithUnit: anomalyPoint.ValuesUnit}
 	event.TagsJSON = p.tagsArr
 	event.Tags = strings.Join(p.tagsArr, ",,")
 	event.IsRecovered = false
@@ -513,7 +514,7 @@ func (p *Processor) pushEventToQueue(e *models.AlertCurEvent) {
 	dispatch.LogEvent(e, "push_queue")
 	if !queue.EventQueue.PushFront(e) {
 		logger.Warningf("event_push_queue: queue is full, event:%+v", e)
-		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "push_event_queue").Inc()
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "push_event_queue", p.BusiGroupCache.GetNameByBusiGroupId(p.rule.GroupId), fmt.Sprintf("%v", p.rule.Id)).Inc()
 	}
 }
 
@@ -524,7 +525,7 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 	curEvents, err := models.AlertCurEventGetByRuleIdAndDsId(p.ctx, p.rule.Id, p.datasourceId)
 	if err != nil {
 		logger.Errorf("recover event from db for rule:%s failed, err:%s", p.Key(), err)
-		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "get_recover_event").Inc()
+		p.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", p.DatasourceId()), "get_recover_event", p.BusiGroupCache.GetNameByBusiGroupId(p.rule.GroupId), fmt.Sprintf("%v", p.rule.Id)).Inc()
 		p.fires = NewAlertCurEventMap(nil)
 		return
 	}
@@ -558,7 +559,7 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 	p.pendingsUseByRecover = NewAlertCurEventMap(pendingsUseByRecoverMap)
 }
 
-func (p *Processor) fillTags(anomalyPoint common.AnomalyPoint) {
+func (p *Processor) fillTags(anomalyPoint models.AnomalyPoint) {
 	// handle series tags
 	tagsMap := make(map[string]string)
 	for label, value := range anomalyPoint.Labels {
@@ -648,10 +649,10 @@ func labelMapToArr(m map[string]string) []string {
 	return labelStrings
 }
 
-func Hash(ruleId, datasourceId int64, vector common.AnomalyPoint) string {
+func Hash(ruleId, datasourceId int64, vector models.AnomalyPoint) string {
 	return str.MD5(fmt.Sprintf("%d_%s_%d_%d_%s", ruleId, vector.Labels.String(), datasourceId, vector.Severity, vector.Query))
 }
 
-func TagHash(vector common.AnomalyPoint) string {
+func TagHash(vector models.AnomalyPoint) string {
 	return str.MD5(vector.Labels.String())
 }

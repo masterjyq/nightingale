@@ -348,7 +348,7 @@ func UsersGetByGroupIds(ctx *ctx.Context, groupIds []int64) ([]User, error) {
 	return users, nil
 }
 
-func InitRoot(ctx *ctx.Context) {
+func InitRoot(ctx *ctx.Context) bool {
 	user, err := UserGetByUsername(ctx, "root")
 	if err != nil {
 		fmt.Println("failed to query user root:", err)
@@ -356,12 +356,12 @@ func InitRoot(ctx *ctx.Context) {
 	}
 
 	if user == nil {
-		return
+		return false
 	}
 
 	if len(user.Password) > 31 {
 		// already done before
-		return
+		return false
 	}
 
 	newPass, err := CryptoPass(ctx, user.Password)
@@ -377,6 +377,7 @@ func InitRoot(ctx *ctx.Context) {
 	}
 
 	fmt.Println("root password init done")
+	return true
 }
 
 func reachLoginFailCount(ctx *ctx.Context, redisObj storage.Redis, username string, count int64) (bool, error) {
@@ -801,6 +802,10 @@ func (u *User) BusiGroups(ctx *ctx.Context, limit int, query string, all ...bool
 		t, err = TargetGet(ctx, "ident=?", query)
 		if err != nil {
 			return lst, err
+		}
+
+		if t == nil {
+			return lst, nil
 		}
 
 		t.GroupIds, err = TargetGroupIdsGetByIdent(ctx, t.Ident)
