@@ -15,14 +15,15 @@ import (
 
 	"github.com/ccfos/nightingale/v6/alert/common"
 	"github.com/ccfos/nightingale/v6/alert/process"
+	"github.com/ccfos/nightingale/v6/dscache"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/hash"
 	"github.com/ccfos/nightingale/v6/pkg/parser"
 	promsdk "github.com/ccfos/nightingale/v6/pkg/prom"
+	promql2 "github.com/ccfos/nightingale/v6/pkg/promql"
 	"github.com/ccfos/nightingale/v6/pkg/unit"
 	"github.com/ccfos/nightingale/v6/prom"
-	"github.com/ccfos/nightingale/v6/tdengine"
 	"github.com/prometheus/common/model"
 
 	"github.com/robfig/cron/v3"
@@ -40,9 +41,8 @@ type AlertRuleWorker struct {
 
 	Processor *process.Processor
 
-	PromClients     *prom.PromClientMap
-	TdengineClients *tdengine.TdengineClientMap
-	Ctx             *ctx.Context
+	PromClients *prom.PromClientMap
+	Ctx         *ctx.Context
 
 	Scheduler *cron.Cron
 
@@ -59,6 +59,10 @@ const (
 	QUERY_DATA      = "query_data"
 )
 
+const (
+	JoinMark = "@@"
+)
+
 type JoinType string
 
 const (
@@ -67,7 +71,7 @@ const (
 	Inner JoinType = "inner"
 )
 
-func NewAlertRuleWorker(rule *models.AlertRule, datasourceId int64, Processor *process.Processor, promClients *prom.PromClientMap, tdengineClients *tdengine.TdengineClientMap, ctx *ctx.Context) *AlertRuleWorker {
+func NewAlertRuleWorker(rule *models.AlertRule, datasourceId int64, Processor *process.Processor, promClients *prom.PromClientMap, ctx *ctx.Context) *AlertRuleWorker {
 	arw := &AlertRuleWorker{
 		DatasourceId: datasourceId,
 		Quit:         make(chan struct{}),
@@ -75,7 +79,6 @@ func NewAlertRuleWorker(rule *models.AlertRule, datasourceId int64, Processor *p
 		Processor:    Processor,
 
 		PromClients:             promClients,
-		TdengineClients:         tdengineClients,
 		Ctx:                     ctx,
 		HostAndDeviceIdentCache: sync.Map{},
 		DeviceIdentHook: func(arw *AlertRuleWorker, paramQuery models.ParamQuery) ([]string, error) {
@@ -133,11 +136,11 @@ func (arw *AlertRuleWorker) Prepare() {
 }
 
 func (arw *AlertRuleWorker) Start() {
-	logger.Infof("eval:%s started", arw.Key())
 	arw.Scheduler.Start()
 }
 
 func (arw *AlertRuleWorker) Eval() {
+	logger.Infof("eval:%s started", arw.Key())
 	if arw.Processor.PromEvalInterval == 0 {
 		arw.Processor.PromEvalInterval = getPromEvalInterval(arw.Processor.ScheduleEntry.Schedule)
 	}
@@ -162,12 +165,10 @@ func (arw *AlertRuleWorker) Eval() {
 		anomalyPoints, err = arw.GetPromAnomalyPoint(cachedRule.RuleConfig)
 	case models.HOST:
 		anomalyPoints, err = arw.GetHostAnomalyPoint(cachedRule.RuleConfig)
-	case models.TDENGINE:
-		anomalyPoints, recoverPoints, err = arw.GetTdengineAnomalyPoint(cachedRule, arw.Processor.DatasourceId())
 	case models.LOKI:
 		anomalyPoints, err = arw.GetPromAnomalyPoint(cachedRule.RuleConfig)
 	default:
-		return
+		anomalyPoints, recoverPoints = arw.GetAnomalyPoint(cachedRule, arw.Processor.DatasourceId())
 	}
 
 	if err != nil {
@@ -376,7 +377,7 @@ func (arw *AlertRuleWorker) VarFillingAfterQuery(query models.PromQuery, readerC
 			}
 			seqVals := getSamples(value)
 			// 得到参数变量的所有组合
-			paramPermutation, err := arw.getParamPermutation(param, ParamKeys)
+			paramPermutation, err := arw.getParamPermutation(param, ParamKeys, varToLabel, query.PromQl, readerClient)
 			if err != nil {
 				logger.Errorf("rule_eval:%s, paramPermutation error:%v", arw.Key(), err)
 				continue
@@ -391,8 +392,8 @@ func (arw *AlertRuleWorker) VarFillingAfterQuery(query models.PromQuery, readerC
 					curRealQuery = fillVar(curRealQuery, paramKey, val)
 				}
 
-				if _, ok := paramPermutation[strings.Join(cur, "-")]; ok {
-					anomalyPointsMap[strings.Join(cur, "-")] = models.AnomalyPoint{
+				if _, ok := paramPermutation[strings.Join(cur, JoinMark)]; ok {
+					anomalyPointsMap[strings.Join(cur, JoinMark)] = models.AnomalyPoint{
 						Key:       seqVals[i].Metric.String(),
 						Timestamp: seqVals[i].Timestamp.Unix(),
 						Value:     float64(seqVals[i].Value),
@@ -401,7 +402,7 @@ func (arw *AlertRuleWorker) VarFillingAfterQuery(query models.PromQuery, readerC
 						Query:     curRealQuery,
 					}
 					// 生成异常点后，删除该参数组合
-					delete(paramPermutation, strings.Join(cur, "-"))
+					delete(paramPermutation, strings.Join(cur, JoinMark))
 				}
 			}
 
@@ -497,7 +498,7 @@ func removeVal(promql string) string {
 }
 
 // 获取参数变量的所有组合
-func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.ParamQuery, paramKeys []string) (map[string]struct{}, error) {
+func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.ParamQuery, paramKeys []string, varToLabel map[string]string, originPromql string, readerClient promsdk.API) (map[string]struct{}, error) {
 
 	// 参数变量查询，得到参数变量值
 	paramMap := make(map[string][]string)
@@ -529,7 +530,15 @@ func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.Param
 			if err != nil {
 				logger.Errorf("query:%s fail to unmarshalling into string slice, error:%v", paramQuery.Query, err)
 			}
-			params = query
+			if len(query) == 0 {
+				paramsKeyAllLabel, err := getParamKeyAllLabel(varToLabel[paramKey], originPromql, readerClient)
+				if err != nil {
+					logger.Errorf("rule_eval:%s, fail to getParamKeyAllLabel, error:%v", arw.Key(), paramQuery.Query, err)
+				}
+				params = paramsKeyAllLabel
+			} else {
+				params = query
+			}
 		default:
 			return nil, fmt.Errorf("unknown param type: %s", paramQuery.ParamType)
 		}
@@ -547,10 +556,61 @@ func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.Param
 
 	res := make(map[string]struct{})
 	for i := range permutation {
-		res[strings.Join(permutation[i], "@@")] = struct{}{}
+		res[strings.Join(permutation[i], JoinMark)] = struct{}{}
 	}
 
 	return res, nil
+}
+
+func getParamKeyAllLabel(paramKey string, promql string, client promsdk.API) ([]string, error) {
+	labels, metricName, err := promql2.GetLabelsAndMetricNameWithReplace(promql, "$")
+	if err != nil {
+		return nil, fmt.Errorf("promql:%s, get labels error:%v", promql, err)
+	}
+	labelstrs := make([]string, 0)
+	for _, label := range labels {
+		if strings.HasPrefix(label.Value, "$") {
+			continue
+		}
+		labelstrs = append(labelstrs, label.Name+label.Op+label.Value)
+	}
+	pr := metricName + "{" + strings.Join(labelstrs, ",") + "}"
+
+	value, _, err := client.Query(context.Background(), pr, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("promql: %s query error: %v", pr, err)
+	}
+	labelValuesMap := make(map[string]struct{})
+
+	switch value.Type() {
+	case model.ValVector:
+		vector := value.(model.Vector)
+		for _, sample := range vector {
+			for labelName, labelValue := range sample.Metric {
+				// 只处理ParamKeys中指定的label
+				if string(labelName) == paramKey {
+					labelValuesMap[string(labelValue)] = struct{}{}
+				}
+			}
+		}
+	case model.ValMatrix:
+		matrix := value.(model.Matrix)
+		for _, series := range matrix {
+			for labelName, labelValue := range series.Metric {
+				// 只处理ParamKeys中指定的label
+				if string(labelName) == paramKey {
+					labelValuesMap[string(labelValue)] = struct{}{}
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0)
+	for labelValue, _ := range labelValuesMap {
+		result = append(result, labelValue)
+	}
+
+	return result, nil
 }
 
 func (arw *AlertRuleWorker) getHostIdents(paramQuery models.ParamQuery) ([]string, error) {
@@ -615,69 +675,6 @@ func combine(paramKeys []string, paraMap map[string][]string, index int, current
 		current[index] = value
 		combine(paramKeys, paraMap, index+1, current, result)
 	}
-}
-
-func (arw *AlertRuleWorker) GetTdengineAnomalyPoint(rule *models.AlertRule, dsId int64) ([]models.AnomalyPoint, []models.AnomalyPoint, error) {
-	// 获取查询和规则判断条件
-	points := []models.AnomalyPoint{}
-	recoverPoints := []models.AnomalyPoint{}
-	ruleConfig := strings.TrimSpace(rule.RuleConfig)
-	if ruleConfig == "" {
-		logger.Warningf("rule_eval:%d promql is blank", rule.Id)
-		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
-		return points, recoverPoints, errors.New("rule config is nil")
-	}
-
-	var ruleQuery models.RuleQuery
-	err := json.Unmarshal([]byte(ruleConfig), &ruleQuery)
-	if err != nil {
-		logger.Warningf("rule_eval:%d promql parse error:%s", rule.Id, err.Error())
-		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
-		return points, recoverPoints, err
-	}
-
-	arw.Inhibit = ruleQuery.Inhibit
-	if len(ruleQuery.Queries) > 0 {
-		seriesStore := make(map[uint64]models.DataResp)
-		// 将不同查询的 hash 索引分组存放
-		seriesTagIndexes := make(map[string]map[uint64][]uint64)
-
-		for _, query := range ruleQuery.Queries {
-			seriesTagIndex := make(map[uint64][]uint64)
-
-			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
-			cli := arw.TdengineClients.GetCli(dsId)
-			if cli == nil {
-				logger.Warningf("rule_eval:%d tdengine client is nil", rule.Id)
-				arw.Processor.Stats.CounterQueryDataErrorTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
-				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
-				continue
-			}
-
-			series, err := cli.Query(query)
-			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
-			if err != nil {
-				logger.Warningf("rule_eval rid:%d query data error: %v", rule.Id, err)
-				arw.Processor.Stats.CounterQueryDataErrorTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
-				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), QUERY_DATA, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
-				return points, recoverPoints, err
-			}
-			//  此条日志很重要，是告警判断的现场值
-			logger.Debugf("rule_eval rid:%d req:%+v resp:%+v", rule.Id, query, series)
-			MakeSeriesMap(series, seriesTagIndex, seriesStore)
-			ref, err := GetQueryRef(query)
-			if err != nil {
-				logger.Warningf("rule_eval rid:%d query ref error: %v query:%+v", rule.Id, err, query)
-				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
-				continue
-			}
-			seriesTagIndexes[ref] = seriesTagIndex
-		}
-
-		points, recoverPoints = GetAnomalyPoint(rule.Id, ruleQuery, seriesTagIndexes, seriesStore)
-	}
-
-	return points, recoverPoints, nil
 }
 
 func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.AnomalyPoint, error) {
@@ -1230,6 +1227,7 @@ func GetQueryRefAndUnit(query interface{}) (string, string, error) {
 // 再查询得到满足值变量的所有结果加入异常点列表
 // 参数变量的值不满足的组合，需要覆盖上层筛选中产生的异常点
 func (arw *AlertRuleWorker) VarFillingBeforeQuery(query models.PromQuery, readerClient promsdk.API) []models.AnomalyPoint {
+	varToLabel := ExtractVarMapping(query.PromQl)
 	// 存储异常点的 map，key 为参数变量的组合，可以实现子筛选对上一层筛选的覆盖
 	anomalyPointsMap := sync.Map{}
 	// 统一变量配置格式
@@ -1272,7 +1270,7 @@ func (arw *AlertRuleWorker) VarFillingBeforeQuery(query models.PromQuery, reader
 				curPromql = strings.Replace(curPromql, fmt.Sprintf("$%s", key), val, -1)
 			}
 			// 得到参数变量的所有组合
-			paramPermutation, err := arw.getParamPermutation(param, ParamKeys)
+			paramPermutation, err := arw.getParamPermutation(param, ParamKeys, varToLabel, query.PromQl, readerClient)
 			if err != nil {
 				logger.Errorf("rule_eval:%s, paramPermutation error:%v", arw.Key(), err)
 				continue
@@ -1281,7 +1279,7 @@ func (arw *AlertRuleWorker) VarFillingBeforeQuery(query models.PromQuery, reader
 			keyToPromql := make(map[string]string)
 			for paramPermutationKeys, _ := range paramPermutation {
 				realPromql := curPromql
-				split := strings.Split(paramPermutationKeys, "@@")
+				split := strings.Split(paramPermutationKeys, JoinMark)
 				for j := range ParamKeys {
 					realPromql = fillVar(realPromql, ParamKeys[j], split[j])
 				}
@@ -1415,4 +1413,183 @@ func fillVar(curRealQuery string, paramKey string, val string) string {
 	curRealQuery = strings.Replace(curRealQuery, fmt.Sprintf("'$%s'", paramKey), fmt.Sprintf("'%s'", val), -1)
 	curRealQuery = strings.Replace(curRealQuery, fmt.Sprintf("\"$%s\"", paramKey), fmt.Sprintf("\"%s\"", val), -1)
 	return curRealQuery
+}
+
+func (arw *AlertRuleWorker) GetAnomalyPoint(rule *models.AlertRule, dsId int64) ([]models.AnomalyPoint, []models.AnomalyPoint) {
+	// 获取查询和规则判断条件
+	points := []models.AnomalyPoint{}
+	recoverPoints := []models.AnomalyPoint{}
+	ruleConfig := strings.TrimSpace(rule.RuleConfig)
+	if ruleConfig == "" {
+		logger.Warningf("rule_eval:%d promql is blank", rule.Id)
+		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		return points, recoverPoints
+	}
+
+	var ruleQuery models.RuleQuery
+	err := json.Unmarshal([]byte(ruleConfig), &ruleQuery)
+	if err != nil {
+		logger.Warningf("rule_eval:%d promql parse error:%s", rule.Id, err.Error())
+		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		return points, recoverPoints
+	}
+
+	arw.Inhibit = ruleQuery.Inhibit
+	if len(ruleQuery.Queries) > 0 {
+		seriesStore := make(map[uint64]models.DataResp)
+		seriesTagIndexes := make(map[string]map[uint64][]uint64, 0)
+		for _, query := range ruleQuery.Queries {
+			seriesTagIndex := make(map[uint64][]uint64)
+
+			plug, exists := dscache.DsCache.Get(rule.Cate, dsId)
+			if !exists {
+				logger.Warningf("rule_eval rid:%d datasource:%d not exists", rule.Id, dsId)
+				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+				continue
+			}
+
+			series, err := plug.QueryData(context.Background(), query)
+			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
+			if err != nil {
+				logger.Warningf("rule_eval rid:%d query data error: %v", rule.Id, err)
+				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+				continue
+			}
+
+			//  此条日志很重要，是告警判断的现场值
+			logger.Infof("rule_eval rid:%d req:%+v resp:%v", rule.Id, query, series)
+			for i := 0; i < len(series); i++ {
+				serieHash := hash.GetHash(series[i].Metric, series[i].Ref)
+				tagHash := hash.GetTagHash(series[i].Metric)
+				seriesStore[serieHash] = series[i]
+
+				// 将曲线按照相同的 tag 分组
+				if _, exists := seriesTagIndex[tagHash]; !exists {
+					seriesTagIndex[tagHash] = make([]uint64, 0)
+				}
+				seriesTagIndex[tagHash] = append(seriesTagIndex[tagHash], serieHash)
+			}
+			ref, err := GetQueryRef(query)
+			if err != nil {
+				logger.Warningf("rule_eval rid:%d query:%+v get ref error:%s", rule.Id, query, err.Error())
+				continue
+			}
+			seriesTagIndexes[ref] = seriesTagIndex
+		}
+
+		unitMap := make(map[string]string)
+		for _, query := range ruleQuery.Queries {
+			ref, unit, err := GetQueryRefAndUnit(query)
+			if err != nil {
+				continue
+			}
+			unitMap[ref] = unit
+		}
+
+		// 判断
+		for _, trigger := range ruleQuery.Triggers {
+			seriesTagIndex := ProcessJoins(rule.Id, trigger, seriesTagIndexes, seriesStore)
+			for _, seriesHash := range seriesTagIndex {
+				valuesUnitMap := make(map[string]unit.FormattedValue)
+
+				sort.Slice(seriesHash, func(i, j int) bool {
+					return seriesHash[i] < seriesHash[j]
+				})
+
+				m := make(map[string]interface{})
+				var ts int64
+				var sample models.DataResp
+				var value float64
+				for _, serieHash := range seriesHash {
+					series, exists := seriesStore[serieHash]
+					if !exists {
+						logger.Warningf("rule_eval rid:%d series:%+v not found", rule.Id, series)
+						continue
+					}
+					t, v, exists := series.Last()
+					if !exists {
+						logger.Warningf("rule_eval rid:%d series:%+v value not found", rule.Id, series)
+						continue
+					}
+
+					if !strings.Contains(trigger.Exp, "$"+series.Ref) {
+						// 表达式中不包含该变量
+						continue
+					}
+
+					m["$"+series.Ref] = v
+					m["$"+series.Ref+"."+series.MetricName()] = v
+					for k, v := range series.Metric {
+						if k == "__name__" {
+							continue
+						}
+
+						if !strings.Contains(trigger.Exp, "$"+series.Ref+"."+string(k)) {
+							// 过滤掉表达式中不包含的标签
+							continue
+						}
+
+						m["$"+series.Ref+"."+string(k)] = string(v)
+					}
+
+					if u, exists := unitMap[series.Ref]; exists {
+						valuesUnitMap["$"+series.Ref+"."+series.MetricName()] = unit.ValueFormatter(u, 2, v)
+					}
+
+					ts = int64(t)
+					sample = series
+					value = v
+					logger.Infof("rule_eval rid:%d origin series labels:%+v", rule.Id, series.Metric)
+				}
+
+				isTriggered := parser.CalcWithRid(trigger.Exp, m, rule.Id)
+				//  此条日志很重要，是告警判断的现场值
+				logger.Infof("rule_eval rid:%d trigger:%+v exp:%s res:%v m:%v", rule.Id, trigger, trigger.Exp, isTriggered, m)
+
+				var values string
+				for k, v := range m {
+					if !strings.Contains(k, ".") {
+						continue
+					}
+
+					switch v.(type) {
+					case float64:
+						values += fmt.Sprintf("%s:%.3f ", k, v)
+					case string:
+						values += fmt.Sprintf("%s:%s ", k, v)
+					}
+				}
+
+				point := models.AnomalyPoint{
+					Key:           sample.MetricName(),
+					Labels:        sample.Metric,
+					Timestamp:     int64(ts),
+					Value:         value,
+					Values:        values,
+					Severity:      trigger.Severity,
+					Triggered:     isTriggered,
+					Query:         fmt.Sprintf("query:%+v trigger:%+v", ruleQuery.Queries, trigger),
+					RecoverConfig: trigger.RecoverConfig,
+					ValuesUnit:    valuesUnitMap,
+				}
+
+				if isTriggered {
+					points = append(points, point)
+				} else {
+					switch trigger.RecoverConfig.JudgeType {
+					case models.Origin:
+						// do nothing
+					case models.RecoverOnCondition:
+						fulfill := parser.CalcWithRid(trigger.RecoverConfig.RecoverExp, m, rule.Id)
+						if !fulfill {
+							continue
+						}
+					}
+					recoverPoints = append(recoverPoints, point)
+				}
+			}
+		}
+	}
+
+	return points, recoverPoints
 }
