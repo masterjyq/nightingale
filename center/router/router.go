@@ -512,6 +512,29 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinPayloadsDel)
 		pages.GET("/builtin-payload", rt.auth(), rt.user(), rt.builtinPayloadsGetByUUIDOrID)
 
+		pages.POST("/message-templates", rt.auth(), rt.user(), rt.perm("/notification-templates/add"), rt.messageTemplatesAdd)
+		pages.DELETE("/message-templates", rt.auth(), rt.user(), rt.perm("/notification-templates/del"), rt.messageTemplatesDel)
+		pages.PUT("/message-template/:id", rt.auth(), rt.user(), rt.perm("/notification-templates/put"), rt.messageTemplatePut)
+		pages.GET("/message-template/:id", rt.auth(), rt.user(), rt.perm("/notification-templates"), rt.messageTemplateGet)
+		pages.GET("/message-templates", rt.auth(), rt.user(), rt.messageTemplatesGet)
+		pages.POST("/events-message", rt.auth(), rt.user(), rt.eventsMessage)
+
+		pages.POST("/notify-rules", rt.auth(), rt.user(), rt.perm("/notification-rules/add"), rt.notifyRulesAdd)
+		pages.DELETE("/notify-rules", rt.auth(), rt.user(), rt.perm("/notification-rules/del"), rt.notifyRulesDel)
+		pages.PUT("/notify-rule/:id", rt.auth(), rt.user(), rt.perm("/notification-rules/put"), rt.notifyRulePut)
+		pages.GET("/notify-rule/:id", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyRuleGet)
+		pages.GET("/notify-rules", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyRulesGet)
+		pages.POST("/notify-rule/test", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyTest)
+		pages.GET("/notify-rule/custom-params", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyRuleCustomParamsGet)
+
+		pages.POST("/notify-channel-configs", rt.auth(), rt.user(), rt.perm("/notification-channels/add"), rt.notifyChannelsAdd)
+		pages.DELETE("/notify-channel-configs", rt.auth(), rt.user(), rt.perm("/notification-channels/del"), rt.notifyChannelsDel)
+		pages.PUT("/notify-channel-config/:id", rt.auth(), rt.user(), rt.perm("/notification-channels/put"), rt.notifyChannelPut)
+		pages.GET("/notify-channel-config/:id", rt.auth(), rt.user(), rt.perm("/notification-channels"), rt.notifyChannelGet)
+		pages.GET("/notify-channel-configs", rt.auth(), rt.user(), rt.perm("/notification-channels"), rt.notifyChannelsGet)
+		pages.GET("/simplified-notify-channel-configs", rt.notifyChannelsGetForNormalUser)
+		pages.GET("/flashduty-channel-list/:id", rt.auth(), rt.user(), rt.flashDutyNotifyChannelsGet)
+		pages.GET("/notify-channel-config", rt.auth(), rt.user(), rt.notifyChannelGetBy)
 	}
 
 	r.GET("/api/n9e/versions", func(c *gin.Context) {
@@ -611,6 +634,15 @@ func (rt *Router) Config(r *gin.Engine) {
 			service.GET("/alert-cur-events-del-by-hash", rt.alertCurEventDelByHash)
 
 			service.POST("/center/heartbeat", rt.heartbeat)
+
+			service.GET("/es-index-pattern-list", rt.esIndexPatternGetList)
+
+			service.GET("/notify-rules", rt.notifyRulesGetByService)
+
+			service.GET("/notify-channels", rt.notifyChannelConfigGets)
+
+			service.GET("/message-templates", rt.messageTemplateGets)
+
 		}
 	}
 
