@@ -47,6 +47,13 @@ const (
 	AlertRuleRecoverDuration0Sec = 0
 )
 
+const (
+	SeverityEmergency = 1
+	SeverityWarning   = 2
+	SeverityNotice    = 3
+	SeverityLowest    = 4
+)
+
 type AlertRule struct {
 	Id                    int64                  `json:"id" gorm:"primaryKey"`
 	GroupId               int64                  `json:"group_id"` // busi group id
@@ -1364,4 +1371,19 @@ func InsertAlertRule(ctx *ctx.Context, ars []*AlertRule) error {
 
 func (ar *AlertRule) Hash() string {
 	return str.MD5(fmt.Sprintf("%d_%s_%s", ar.Id, ar.DatasourceIds, ar.RuleConfig))
+}
+
+// 复制告警策略，需要提供操作者名称和新的业务组ID
+func (ar *AlertRule) Clone(operatorName string, newBgid int64) *AlertRule {
+	newAr := ar
+
+	newAr.Id = 0
+	newAr.GroupId = newBgid
+	newAr.Name = ar.Name
+	newAr.UpdateBy = operatorName
+	newAr.UpdateAt = time.Now().Unix()
+	newAr.CreateBy = operatorName
+	newAr.CreateAt = time.Now().Unix()
+
+	return newAr
 }

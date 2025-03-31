@@ -3,6 +3,8 @@ package dispatch
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"html/template"
 	"net/url"
 	"strconv"
@@ -79,7 +81,7 @@ func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.Us
 }
 
 func (e *Dispatch) ReloadTpls() error {
-	err := e.relaodTpls()
+	err := e.reloadTpls()
 	if err != nil {
 		logger.Errorf("failed to reload tpls: %v", err)
 	}
@@ -87,13 +89,13 @@ func (e *Dispatch) ReloadTpls() error {
 	duration := time.Duration(9000) * time.Millisecond
 	for {
 		time.Sleep(duration)
-		if err := e.relaodTpls(); err != nil {
+		if err := e.reloadTpls(); err != nil {
 			logger.Warning("failed to reload tpls:", err)
 		}
 	}
 }
 
-func (e *Dispatch) relaodTpls() error {
+func (e *Dispatch) reloadTpls() error {
 	tmpTpls, err := models.ListTpls(e.ctx)
 	if err != nil {
 		return err
@@ -160,12 +162,15 @@ func (e *Dispatch) HandleEventWithNotifyRule(event *models.AlertCurEvent, isSubs
 				notifyChannel := e.notifyChannelCache.Get(notifyRule.NotifyConfigs[i].ChannelID)
 				messageTemplate := e.messageTemplateCache.Get(notifyRule.NotifyConfigs[i].TemplateID)
 				if notifyChannel == nil {
+					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{event}, notifyRuleId, fmt.Sprintf("notify_channel_id:%d", notifyRule.NotifyConfigs[i].ChannelID), "", "", errors.New("notify_channel not found"))
 					logger.Warningf("notify_id: %d, event:%+v, channel_id:%d, template_id: %d, notify_channel not found", notifyRuleId, event, notifyRule.NotifyConfigs[i].ChannelID, notifyRule.NotifyConfigs[i].TemplateID)
 					continue
 				}
 
 				if notifyChannel.RequestType != "flashduty" && messageTemplate == nil {
 					logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, template_id: %d, message_template not found", notifyRuleId, notifyChannel.Ident, event, notifyRule.NotifyConfigs[i].TemplateID)
+					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{event}, notifyRuleId, notifyChannel.Name, "", "", errors.New("message_template not found"))
+
 					continue
 				}
 
@@ -266,9 +271,8 @@ func NotifyRuleApplicable(notifyConfig *models.NotifyConfig, event *models.Alert
 	return timeMatch && severityMatch && tagMatch && attributesMatch
 }
 
-func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType) ([]*models.User, []int64, map[string]string) {
+func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, contactKey string, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType) ([]string, []int64, map[string]string) {
 	customParams := make(map[string]string)
-	var userInfos []*models.User
 	var flashDutyChannelIDs []int64
 	var userInfoParams models.CustomParams
 
@@ -292,28 +296,44 @@ func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, userCache *memsto.
 		}
 	}
 
-	users := userCache.GetByUserIds(userInfoParams.UserIDs)
+	if len(userInfoParams.UserIDs) == 0 && len(userInfoParams.UserGroupIDs) == 0 {
+		return []string{}, flashDutyChannelIDs, customParams
+	}
+
+	userIds := make([]int64, 0)
+	userIds = append(userIds, userInfoParams.UserIDs...)
+
+	if len(userInfoParams.UserGroupIDs) > 0 {
+		userGroups := userGroupCache.GetByUserGroupIds(userInfoParams.UserGroupIDs)
+		for _, userGroup := range userGroups {
+			userIds = append(userIds, userGroup.UserIds...)
+		}
+	}
+
+	users := userCache.GetByUserIds(userIds)
 	visited := make(map[int64]bool)
+	sendtos := make([]string, 0)
 	for _, user := range users {
 		if visited[user.Id] {
 			continue
 		}
-		visited[user.Id] = true
-		userInfos = append(userInfos, user)
-	}
-
-	userGroups := userGroupCache.GetByUserGroupIds(userInfoParams.UserGroupIDs)
-	for _, userGroup := range userGroups {
-		for _, user := range userGroup.Users {
-			if visited[user.Id] {
-				continue
-			}
-			visited[user.Id] = true
-			userInfos = append(userInfos, &user)
+		var sendto string
+		if contactKey == "phone" {
+			sendto = user.Phone
+		} else if contactKey == "email" {
+			sendto = user.Email
+		} else {
+			sendto, _ = user.ExtractToken(contactKey)
 		}
+
+		if sendto == "" {
+			continue
+		}
+		sendtos = append(sendtos, sendto)
+		visited[user.Id] = true
 	}
 
-	return userInfos, flashDutyChannelIDs, customParams
+	return sendtos, flashDutyChannelIDs, customParams
 }
 
 func (e *Dispatch) sendV2(events []*models.AlertCurEvent, notifyRuleId int64, notifyConfig *models.NotifyConfig, notifyChannel *models.NotifyChannelConfig, messageTemplate *models.MessageTemplate) {
@@ -322,12 +342,17 @@ func (e *Dispatch) sendV2(events []*models.AlertCurEvent, notifyRuleId int64, no
 		return
 	}
 
-	tplContent := make(map[string]string)
+	tplContent := make(map[string]interface{})
 	if notifyChannel.RequestType != "flashduty" {
 		tplContent = messageTemplate.RenderEvent(events)
 	}
 
-	userInfos, flashDutyChannelIDs, customParams := GetNotifyConfigParams(notifyConfig, e.userCache, e.userGroupCache)
+	var contactKey string
+	if notifyChannel.ParamConfig != nil && notifyChannel.ParamConfig.UserInfo != nil {
+		contactKey = notifyChannel.ParamConfig.UserInfo.ContactKey
+	}
+
+	sendtos, flashDutyChannelIDs, customParams := GetNotifyConfigParams(notifyConfig, contactKey, e.userCache, e.userGroupCache)
 
 	e.Astats.GaugeNotifyRecordQueueSize.Inc()
 	defer e.Astats.GaugeNotifyRecordQueueSize.Dec()
@@ -336,48 +361,50 @@ func (e *Dispatch) sendV2(events []*models.AlertCurEvent, notifyRuleId int64, no
 	case "flashduty":
 		for i := range flashDutyChannelIDs {
 			respBody, err := notifyChannel.SendFlashDuty(events, flashDutyChannelIDs[i], e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
-			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, IntegrationUrl: %v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, respBody, err)
-			sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, respBody, err)
+			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, IntegrationUrl: %v dutychannel_id: %v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, flashDutyChannelIDs[i], respBody, err)
+			sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, strconv.FormatInt(flashDutyChannelIDs[i], 10), respBody, err)
 		}
 		return
 	case "http":
 		if e.notifyChannelCache.HttpConcurrencyAdd(notifyChannel.ID) {
 			defer e.notifyChannelCache.HttpConcurrencyDone(notifyChannel.ID)
 		}
+		if notifyChannel.RequestConfig == nil {
+			logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, request config not found", notifyRuleId, notifyChannel.Name, events[0])
+		}
 
-		if notifyChannel.ParamConfig.UserInfo != nil && len(userInfos) > 0 {
-			for i := range userInfos {
-				respBody, err := notifyChannel.SendHTTP(events, tplContent, customParams, userInfos[i], e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
-				logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, userInfo:%+v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, userInfos[i], respBody, err)
-				sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, notifyChannel.RequestConfig.HTTPRequestConfig.URL, respBody, err)
-			}
+		if notifyChannel.RequestConfig.HTTPRequestConfig == nil {
+			logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, http request config not found", notifyRuleId, notifyChannel.Name, events[0])
+		}
+
+		if NeedBatchContacts(notifyChannel.RequestConfig.HTTPRequestConfig) || len(sendtos) == 0 {
+			resp, err := notifyChannel.SendHTTP(events, tplContent, customParams, sendtos, e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
+			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, userInfo:%+v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, sendtos, resp, err)
+
+			sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, getSendTarget(customParams, sendtos), resp, err)
 		} else {
-			respBody, err := notifyChannel.SendHTTP(events, tplContent, customParams, nil, e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
-			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, respBody, err)
-			sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, notifyChannel.RequestConfig.HTTPRequestConfig.URL, respBody, err)
+			for i := range sendtos {
+				resp, err := notifyChannel.SendHTTP(events, tplContent, customParams, []string{sendtos[i]}, e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
+				logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, userInfo:%+v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, sendtos[i], resp, err)
+				sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, getSendTarget(customParams, []string{sendtos[i]}), resp, err)
+			}
 		}
 
 	case "smtp":
-		err := notifyChannel.SendEmail(events, tplContent, userInfos, e.notifyChannelCache.GetSmtpClient(notifyChannel.ID))
-		if err != nil {
-			logger.Errorf("send email error: %v", err)
-		}
-		for i := range userInfos {
-			msg := ""
-			if err == nil {
-				msg = "ok"
-			}
+		notifyChannel.SendEmail(notifyRuleId, events, tplContent, sendtos, e.notifyChannelCache.GetSmtpClient(notifyChannel.ID))
 
-			// todo 这里的通知记录需要调整
-			sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, userInfos[i].Email, msg, err)
-		}
 	case "script":
-		target, res, err := notifyChannel.SendScript(events, tplContent, customParams, userInfos)
+		target, res, err := notifyChannel.SendScript(events, tplContent, customParams, sendtos)
 		logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, target:%s, res:%s, err:%v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, target, res, err)
 		sender.NotifyRecord(e.ctx, events, notifyRuleId, notifyChannel.Name, target, res, err)
 	default:
 		logger.Warningf("notify_id: %d, channel_name: %v, event:%+v send type not found", notifyRuleId, notifyChannel.Name, events[0])
 	}
+}
+
+func NeedBatchContacts(requestConfig *models.HTTPRequestConfig) bool {
+	b, _ := json.Marshal(requestConfig)
+	return strings.Contains(string(b), "$sendtos")
 }
 
 // HandleEventNotify 处理event事件的主逻辑
@@ -387,10 +414,6 @@ func (e *Dispatch) HandleEventNotify(event *models.AlertCurEvent, isSubscribe bo
 	rule := e.alertRuleCache.Get(event.RuleId)
 	if rule == nil {
 		return
-	}
-
-	if len(rule.NotifyRuleIds) > 0 {
-		event.NotifyRuleIDs = rule.NotifyRuleIds
 	}
 
 	if e.blockEventNotify(rule, event) {
@@ -700,4 +723,23 @@ func mapKeys(m map[int64]struct{}) []int64 {
 		lst = append(lst, k)
 	}
 	return lst
+}
+
+func getSendTarget(customParams map[string]string, sendtos []string) string {
+	if len(customParams) == 0 {
+		return strings.Join(sendtos, ",")
+	}
+
+	values := make([]string, 0)
+	for _, value := range customParams {
+		runes := []rune(value)
+		if len(runes) <= 4 {
+			values = append(values, value)
+		} else {
+			maskedValue := string(runes[:len(runes)-4]) + "****"
+			values = append(values, maskedValue)
+		}
+	}
+
+	return strings.Join(values, ",")
 }

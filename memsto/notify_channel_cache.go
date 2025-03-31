@@ -121,7 +121,6 @@ func (ncc *NotifyChannelCacheType) SyncNotifyChannels() {
 	err := ncc.syncNotifyChannels()
 	if err != nil {
 		fmt.Println("failed to sync notify channels:", err)
-		exit(1)
 	}
 
 	go ncc.loopSyncNotifyChannels()
@@ -265,14 +264,7 @@ func (ncc *NotifyChannelCacheType) startEmailSender(chID int64, smtp *models.SMT
 					m.Mail.GetHeader("Subject"), m.Mail.GetHeader("To"))
 			}
 
-			//for _, to := range m.mail.GetHeader("To") {
-			//	msg := ""
-			//	if err == nil {
-			//		msg = "ok"
-			//	}
-			//	NotifyRecord(ctx, m.events, models.Email, to, msg, err)
-			//}
-
+			// sender.NotifyRecord(ncc.ctx, m.Events, m.NotifyRuleId, models.Email, strings.Join(m.Mail.GetHeader("To"), ","), "", err)
 			size++
 
 			if size >= conf.Batch {

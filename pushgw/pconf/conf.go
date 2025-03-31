@@ -2,7 +2,11 @@ package pconf
 
 import (
 	"log"
+	"net"
+	"net/http"
 	"regexp"
+	"runtime"
+	"time"
 
 	"github.com/ccfos/nightingale/v6/pkg/tlsx"
 
@@ -13,7 +17,7 @@ type Pushgw struct {
 	BusiGroupLabelKey   string
 	IdentMetrics        []string
 	IdentStatsThreshold int
-	IdentDropThreshold  int
+	IdentDropThreshold  int // 每分钟单个 ident 的样本数超过该阈值，则丢弃
 	WriteConcurrency    int
 	LabelRewrite        bool
 	ForceUseServerTS    bool
@@ -27,7 +31,9 @@ type Pushgw struct {
 type WriterGlobalOpt struct {
 	QueueMaxSize            int
 	QueuePopSize            int
-	AllQueueMaxSize         int
+	QueueNumber             int     // 每个 writer 固定数量的队列
+	QueueWaterMark          float64 // 队列将满，开始丢弃数据的水位，比如 0.8
+	AllQueueMaxSize         int64
 	AllQueueMaxSizeInterval int
 	RetryCount              int
 	RetryInterval           int64
@@ -55,6 +61,10 @@ type WriterOptions struct {
 	WriteRelabels []*RelabelConfig
 
 	tlsx.ClientConfig
+
+	// writer 是在配置文件中写死的，不支持动态更新，所以启动的时候就初始化好
+	// 后面大概率也不需要动态更新，pushgw 甚至想单独拆出来作为一个独立的进程提供服务
+	HTTPTransport *http.Transport
 }
 
 type SASLConfig struct {
@@ -98,16 +108,26 @@ func (p *Pushgw) PreCheck() {
 	}
 
 	if p.WriterOpt.QueueMaxSize <= 0 {
-		p.WriterOpt.QueueMaxSize = 10000000
+		p.WriterOpt.QueueMaxSize = 1000_000
 	}
 
 	if p.WriterOpt.QueuePopSize <= 0 {
 		p.WriterOpt.QueuePopSize = 1000
 	}
 
-	if p.WriterOpt.AllQueueMaxSize <= 0 {
-		p.WriterOpt.AllQueueMaxSize = 5000000
+	if p.WriterOpt.QueueNumber <= 0 {
+		if runtime.NumCPU() > 1 {
+			p.WriterOpt.QueueNumber = runtime.NumCPU()
+		} else {
+			p.WriterOpt.QueueNumber = 128
+		}
 	}
+
+	if p.WriterOpt.QueueWaterMark <= 0 {
+		p.WriterOpt.QueueWaterMark = 0.95
+	}
+
+	p.WriterOpt.AllQueueMaxSize = int64(float64(p.WriterOpt.QueueNumber*p.WriterOpt.QueueMaxSize) * p.WriterOpt.QueueWaterMark)
 
 	if p.WriterOpt.AllQueueMaxSizeInterval <= 0 {
 		p.WriterOpt.AllQueueMaxSizeInterval = 200
@@ -137,8 +157,8 @@ func (p *Pushgw) PreCheck() {
 		p.IdentDropThreshold = 5000000
 	}
 
-	for _, writer := range p.Writers {
-		for _, relabel := range writer.WriteRelabels {
+	for index := range p.Writers {
+		for _, relabel := range p.Writers[index].WriteRelabels {
 			if relabel.Regex == "" {
 				relabel.Regex = "(.*)"
 			}
@@ -162,5 +182,31 @@ func (p *Pushgw) PreCheck() {
 				relabel.Replacement = "$1"
 			}
 		}
+
+		tlsConf, err := p.Writers[index].ClientConfig.TLSConfig()
+		if err != nil {
+			panic(err)
+		}
+
+		// 初始化 http transport
+		p.Writers[index].HTTPTransport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   time.Duration(p.Writers[index].DialTimeout) * time.Millisecond,
+				KeepAlive: time.Duration(p.Writers[index].KeepAlive) * time.Millisecond,
+			}).DialContext,
+			ResponseHeaderTimeout: time.Duration(p.Writers[index].Timeout) * time.Millisecond,
+			TLSHandshakeTimeout:   time.Duration(p.Writers[index].TLSHandshakeTimeout) * time.Millisecond,
+			ExpectContinueTimeout: time.Duration(p.Writers[index].ExpectContinueTimeout) * time.Millisecond,
+			MaxConnsPerHost:       p.Writers[index].MaxConnsPerHost,
+			MaxIdleConns:          p.Writers[index].MaxIdleConns,
+			MaxIdleConnsPerHost:   p.Writers[index].MaxIdleConnsPerHost,
+			IdleConnTimeout:       time.Duration(p.Writers[index].IdleConnTimeout) * time.Millisecond,
+		}
+
+		if tlsConf != nil {
+			p.Writers[index].HTTPTransport.TLSClientConfig = tlsConf
+		}
+
 	}
 }

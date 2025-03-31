@@ -67,7 +67,7 @@ func MigrateTables(db *gorm.DB) error {
 		&TaskRecord{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}, &NotifyTpl{},
 		&Board{}, &BoardBusigroup{}, &Users{}, &SsoConfig{}, &models.BuiltinMetric{},
 		&models.MetricFilter{}, &models.NotificaitonRecord{}, &models.TargetBusiGroup{},
-		&models.UserToken{}, &models.DashAnnotation{}, MessageTemplate{}, NotifyRule{}, NotifyChannelConfig{}}
+		&models.UserToken{}, &models.DashAnnotation{}, MessageTemplate{}, NotifyRule{}, NotifyChannelConfig{}, &EsIndexPatternMigrate{}}
 
 	if isPostgres(db) {
 		dts = append(dts, &models.PostgresBuiltinComponent{})
@@ -230,8 +230,9 @@ func InsertPermPoints(db *gorm.DB) {
 	for _, op := range ops {
 		var count int64
 
-		err := db.Raw("SELECT COUNT(*) FROM role_operation WHERE operation = ? AND role_name = ?",
-			op.Operation, op.RoleName).Scan(&count).Error
+		err := db.Model(&models.RoleOperation{}).
+			Where("operation = ? AND role_name = ?", op.Operation, op.RoleName).
+			Count(&count).Error
 
 		if err != nil {
 			logger.Errorf("check role operation exists failed, %v", err)
@@ -242,7 +243,7 @@ func InsertPermPoints(db *gorm.DB) {
 			continue
 		}
 
-		err = db.Create(&op).Error
+		err = db.Model(&models.RoleOperation{}).Create(&op).Error
 		if err != nil {
 			logger.Errorf("insert role operation failed, %v", err)
 		}
@@ -399,6 +400,7 @@ type MessageTemplate struct {
 	UserGroupIds       []int64           `gorm:"column:user_group_ids;type:varchar(64)"`
 	NotifyChannelIdent string            `gorm:"column:notify_channel_ident;type:varchar(64);not null;default:''"`
 	Private            int               `gorm:"column:private;type:int;not null;default:0"`
+	Weight             int               `gorm:"column:weight;type:int;not null;default:0"`
 	CreateAt           int64             `gorm:"column:create_at;not null;default:0"`
 	CreateBy           string            `gorm:"column:create_by;type:varchar(64);not null;default:''"`
 	UpdateAt           int64             `gorm:"column:update_at;not null;default:0"`
@@ -435,6 +437,7 @@ type NotifyChannelConfig struct {
 	ParamConfig   models.NotifyParamConfig `gorm:"column:param_config;type:text"`
 	RequestType   string                   `gorm:"column:request_type;type:varchar(50);not null"`
 	RequestConfig *models.RequestConfig    `gorm:"column:request_config;type:text"`
+	Weight        int                      `gorm:"column:weight;type:int;not null;default:0"`
 	CreateAt      int64                    `gorm:"column:create_at;not null;default:0"`
 	CreateBy      string                   `gorm:"column:create_by;type:varchar(64);not null;default:''"`
 	UpdateAt      int64                    `gorm:"column:update_at;not null;default:0"`

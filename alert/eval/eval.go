@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ccfos/nightingale/v6/alert/astats"
 	"github.com/ccfos/nightingale/v6/alert/common"
 	"github.com/ccfos/nightingale/v6/alert/process"
 	"github.com/ccfos/nightingale/v6/dscache"
@@ -20,6 +21,7 @@ import (
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/hash"
 	"github.com/ccfos/nightingale/v6/pkg/parser"
+	"github.com/ccfos/nightingale/v6/pkg/poster"
 	promsdk "github.com/ccfos/nightingale/v6/pkg/prom"
 	promql2 "github.com/ccfos/nightingale/v6/pkg/promql"
 	"github.com/ccfos/nightingale/v6/pkg/unit"
@@ -35,7 +37,6 @@ type AlertRuleWorker struct {
 	DatasourceId int64
 	Quit         chan struct{}
 	Inhibit      bool
-	Severity     int
 
 	Rule *models.AlertRule
 
@@ -98,7 +99,7 @@ func NewAlertRuleWorker(rule *models.AlertRule, datasourceId int64, Processor *p
 		rule.CronPattern = fmt.Sprintf("@every %ds", interval)
 	}
 
-	arw.Scheduler = cron.New(cron.WithSeconds())
+	arw.Scheduler = cron.New(cron.WithSeconds(), cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
 
 	entryID, err := arw.Scheduler.AddFunc(rule.CronPattern, func() {
 		arw.Eval()
@@ -231,32 +232,42 @@ func (arw *AlertRuleWorker) Stop() {
 
 func (arw *AlertRuleWorker) GetPromAnomalyPoint(ruleConfig string) ([]models.AnomalyPoint, error) {
 	var lst []models.AnomalyPoint
-	var severity int
 
 	var rule *models.PromRuleConfig
 	if err := json.Unmarshal([]byte(ruleConfig), &rule); err != nil {
 		logger.Errorf("rule_eval:%s rule_config:%s, error:%v", arw.Key(), ruleConfig, err)
 		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			"",
+		).Set(0)
 		return lst, err
 	}
 
 	if rule == nil {
 		logger.Errorf("rule_eval:%s rule_config:%s, error:rule is nil", arw.Key(), ruleConfig)
 		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			"",
+		).Set(0)
 		return lst, errors.New("rule is nil")
 	}
 
 	arw.Inhibit = rule.Inhibit
-	for _, query := range rule.Queries {
-		if query.Severity < severity {
-			arw.Severity = query.Severity
-		}
-
+	for i, query := range rule.Queries {
 		readerClient := arw.PromClients.GetCli(arw.DatasourceId)
 
 		if readerClient == nil {
 			logger.Warningf("rule_eval:%s error reader client is nil", arw.Key())
 			arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				fmt.Sprintf("%v", i),
+			).Set(-2)
 			continue
 		}
 
@@ -265,9 +276,21 @@ func (arw *AlertRuleWorker) GetPromAnomalyPoint(ruleConfig string) ([]models.Ano
 			if hasLabelLossAggregator(query) || notExactMatch(query) {
 				// 若有聚合函数或非精确匹配则需要先填充变量然后查询，这个方式效率较低
 				anomalyPoints = arw.VarFillingBeforeQuery(query, readerClient)
+				arw.Processor.Stats.CounterVarFillingQuery.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					fmt.Sprintf("%v", i),
+					"BeforeQuery",
+				).Inc()
 			} else {
 				// 先查询再过滤变量，效率较高，但无法处理有聚合函数的情况
 				anomalyPoints = arw.VarFillingAfterQuery(query, readerClient)
+				arw.Processor.Stats.CounterVarFillingQuery.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					fmt.Sprintf("%v", i),
+					"AfterQuery",
+				).Inc()
 			}
 			lst = append(lst, anomalyPoints...)
 		} else {
@@ -286,12 +309,17 @@ func (arw *AlertRuleWorker) GetPromAnomalyPoint(ruleConfig string) ([]models.Ano
 			}
 
 			var warnings promsdk.Warnings
-			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
+			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId), fmt.Sprintf("%d", arw.Rule.Id)).Inc()
 			value, warnings, err := readerClient.Query(context.Background(), promql, time.Now())
 			if err != nil {
 				logger.Errorf("rule_eval:%s promql:%s, error:%v", arw.Key(), promql, err)
 				arw.Processor.Stats.CounterQueryDataErrorTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
 				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), QUERY_DATA, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					fmt.Sprintf("%v", i),
+				).Set(-1)
 				return lst, err
 			}
 
@@ -303,6 +331,12 @@ func (arw *AlertRuleWorker) GetPromAnomalyPoint(ruleConfig string) ([]models.Ano
 
 			logger.Infof("rule_eval:%s query:%+v, value:%v", arw.Key(), query, value)
 			points := models.ConvertAnomalyPoints(value)
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				fmt.Sprintf("%v", i),
+			).Set(float64(len(points)))
+
 			for i := 0; i < len(points); i++ {
 				points[i].Severity = query.Severity
 				points[i].Query = promql
@@ -313,7 +347,14 @@ func (arw *AlertRuleWorker) GetPromAnomalyPoint(ruleConfig string) ([]models.Ano
 
 			lst = append(lst, points...)
 		}
+
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			fmt.Sprintf("%v", i),
+		).Set(float64(len(lst)))
 	}
+
 	return lst, nil
 }
 
@@ -379,6 +420,7 @@ func (arw *AlertRuleWorker) VarFillingAfterQuery(query models.PromQuery, readerC
 				realQuery = strings.Replace(realQuery, fmt.Sprintf("$%s", key), val, -1)
 			}
 			// 得到满足值变量的所有结果
+			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId), fmt.Sprintf("%d", arw.Rule.Id)).Inc()
 			value, _, err := readerClient.Query(context.Background(), curQuery, time.Now())
 			if err != nil {
 				logger.Errorf("rule_eval:%s, promql:%s, error:%v", arw.Key(), curQuery, err)
@@ -540,7 +582,7 @@ func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.Param
 				logger.Errorf("query:%s fail to unmarshalling into string slice, error:%v", paramQuery.Query, err)
 			}
 			if len(query) == 0 {
-				paramsKeyAllLabel, err := getParamKeyAllLabel(varToLabel[paramKey], originPromql, readerClient)
+				paramsKeyAllLabel, err := getParamKeyAllLabel(varToLabel[paramKey], originPromql, readerClient, arw.DatasourceId, arw.Rule.Id, arw.Processor.Stats)
 				if err != nil {
 					logger.Errorf("rule_eval:%s, fail to getParamKeyAllLabel, error:%v query:%s", arw.Key(), err, paramQuery.Query)
 				}
@@ -571,7 +613,7 @@ func (arw *AlertRuleWorker) getParamPermutation(paramVal map[string]models.Param
 	return res, nil
 }
 
-func getParamKeyAllLabel(paramKey string, promql string, client promsdk.API) ([]string, error) {
+func getParamKeyAllLabel(paramKey string, promql string, client promsdk.API, dsId int64, rid int64, stats *astats.Stats) ([]string, error) {
 	labels, metricName, err := promql2.GetLabelsAndMetricNameWithReplace(promql, "$")
 	if err != nil {
 		return nil, fmt.Errorf("promql:%s, get labels error:%v", promql, err)
@@ -585,6 +627,7 @@ func getParamKeyAllLabel(paramKey string, promql string, client promsdk.API) ([]
 	}
 	pr := metricName + "{" + strings.Join(labelstrs, ",") + "}"
 
+	stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", dsId), fmt.Sprintf("%d", rid)).Inc()
 	value, _, err := client.Query(context.Background(), pr, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("promql: %s query error: %v", pr, err)
@@ -639,16 +682,27 @@ func (arw *AlertRuleWorker) getHostIdents(paramQuery models.ParamQuery) ([]strin
 		return nil, err
 	}
 
-	hostsQuery := models.GetHostsQuery(queries)
-	session := models.TargetFilterQueryBuild(arw.Ctx, hostsQuery, 0, 0)
-	var lst []*models.Target
-	err = session.Find(&lst).Error
-	if err != nil {
-		return nil, err
+	if !arw.Ctx.IsCenter {
+		lst, err := poster.PostByUrlsWithResp[[]*models.Target](arw.Ctx, "/v1/n9e/targets-of-host-query", queries)
+		if err != nil {
+			return nil, err
+		}
+		for i := range lst {
+			params = append(params, lst[i].Ident)
+		}
+	} else {
+		hostsQuery := models.GetHostsQuery(queries)
+		session := models.TargetFilterQueryBuild(arw.Ctx, hostsQuery, 0, 0)
+		var lst []*models.Target
+		err = session.Find(&lst).Error
+		if err != nil {
+			return nil, err
+		}
+		for i := range lst {
+			params = append(params, lst[i].Ident)
+		}
 	}
-	for i := range lst {
-		params = append(params, lst[i].Ident)
-	}
+
 	arw.HostAndDeviceIdentCache.Store(cacheKey, params)
 	return params, nil
 }
@@ -688,28 +742,33 @@ func combine(paramKeys []string, paraMap map[string][]string, index int, current
 
 func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.AnomalyPoint, error) {
 	var lst []models.AnomalyPoint
-	var severity int
 
 	var rule *models.HostRuleConfig
 	if err := json.Unmarshal([]byte(ruleConfig), &rule); err != nil {
 		logger.Errorf("rule_eval:%s rule_config:%s, error:%v", arw.Key(), ruleConfig, err)
 		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			"",
+		).Set(0)
 		return lst, err
 	}
 
 	if rule == nil {
 		logger.Errorf("rule_eval:%s rule_config:%s, error:rule is nil", arw.Key(), ruleConfig)
 		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			"",
+		).Set(0)
 		return lst, errors.New("rule is nil")
 	}
 
 	arw.Inhibit = rule.Inhibit
 	now := time.Now().Unix()
 	for _, trigger := range rule.Triggers {
-		if trigger.Severity < severity {
-			arw.Severity = trigger.Severity
-		}
-
 		switch trigger.Type {
 		case "target_miss":
 			t := now - int64(trigger.Duration)
@@ -734,6 +793,11 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 			idents = append(idents, engineIdents...)
 
 			if len(idents) == 0 {
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					"",
+				).Set(0)
 				continue
 			}
 
@@ -744,6 +808,12 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 					missTargets = append(missTargets, ident)
 				}
 			}
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				"",
+			).Set(float64(len(missTargets)))
+
 			logger.Debugf("rule_eval:%s missTargets:%v", arw.Key(), missTargets)
 			targets := arw.Processor.TargetCache.Gets(missTargets)
 			for _, target := range targets {
@@ -758,6 +828,11 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 		case "offset":
 			idents, exists := arw.Processor.TargetsOfAlertRuleCache.Get(arw.Processor.EngineName, arw.Rule.Id)
 			if !exists {
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					"",
+				).Set(0)
 				logger.Warningf("rule_eval:%s targets not found", arw.Key())
 				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), QUERY_DATA, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
 				continue
@@ -790,6 +865,11 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 			}
 
 			logger.Debugf("rule_eval:%s offsetIdents:%v", arw.Key(), offsetIdents)
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				"",
+			).Set(float64(len(offsetIdents)))
 			for host, offset := range offsetIdents {
 				m := make(map[string]string)
 				target, exists := arw.Processor.TargetCache.Get(host)
@@ -806,6 +886,11 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 			t := now - int64(trigger.Duration)
 			idents, exists := arw.Processor.TargetsOfAlertRuleCache.Get(arw.Processor.EngineName, arw.Rule.Id)
 			if !exists {
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					"",
+				).Set(0)
 				logger.Warningf("rule_eval:%s targets not found", arw.Key())
 				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), QUERY_DATA, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
 				continue
@@ -819,6 +904,11 @@ func (arw *AlertRuleWorker) GetHostAnomalyPoint(ruleConfig string) ([]models.Ano
 				}
 			}
 			logger.Debugf("rule_eval:%s missTargets:%v", arw.Key(), missTargets)
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				"",
+			).Set(float64(len(missTargets)))
 			pct := float64(len(missTargets)) / float64(len(idents)) * 100
 			if pct >= float64(trigger.Percent) {
 				lst = append(lst, models.NewAnomalyPoint(trigger.Type, nil, now, pct, trigger.Severity))
@@ -1190,6 +1280,7 @@ func (arw *AlertRuleWorker) VarFillingBeforeQuery(query models.PromQuery, reader
 						<-semaphore
 						wg.Done()
 					}()
+					arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId), fmt.Sprintf("%d", arw.Rule.Id)).Inc()
 					value, _, err := readerClient.Query(context.Background(), promql, time.Now())
 					if err != nil {
 						logger.Errorf("rule_eval:%s, promql:%s, error:%v", arw.Key(), promql, err)
@@ -1331,6 +1422,12 @@ func (arw *AlertRuleWorker) GetAnomalyPoint(rule *models.AlertRule, dsId int64) 
 	if ruleConfig == "" {
 		logger.Warningf("rule_eval:%d promql is blank", rule.Id)
 		arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_RULE_CONFIG, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+		arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+			fmt.Sprintf("%v", arw.Rule.Id),
+			fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+			"",
+		).Set(0)
+
 		return points, recoverPoints
 	}
 
@@ -1346,24 +1443,42 @@ func (arw *AlertRuleWorker) GetAnomalyPoint(rule *models.AlertRule, dsId int64) 
 	if len(ruleQuery.Queries) > 0 {
 		seriesStore := make(map[uint64]models.DataResp)
 		seriesTagIndexes := make(map[string]map[uint64][]uint64, 0)
-		for _, query := range ruleQuery.Queries {
+		for i, query := range ruleQuery.Queries {
 			seriesTagIndex := make(map[uint64][]uint64)
 
 			plug, exists := dscache.DsCache.Get(rule.Cate, dsId)
 			if !exists {
 				logger.Warningf("rule_eval rid:%d datasource:%d not exists", rule.Id, dsId)
 				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					fmt.Sprintf("%v", i),
+				).Set(-2)
 				continue
 			}
 
 			ctx := context.WithValue(context.Background(), "delay", int64(rule.Delay))
 			series, err := plug.QueryData(ctx, query)
-			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId)).Inc()
+			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId), fmt.Sprintf("%d", rule.Id)).Inc()
 			if err != nil {
 				logger.Warningf("rule_eval rid:%d query data error: %v", rule.Id, err)
 				arw.Processor.Stats.CounterRuleEvalErrorTotal.WithLabelValues(fmt.Sprintf("%v", arw.Processor.DatasourceId()), GET_CLIENT, arw.Processor.BusiGroupCache.GetNameByBusiGroupId(arw.Rule.GroupId), fmt.Sprintf("%v", arw.Rule.Id)).Inc()
+				arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+					fmt.Sprintf("%v", arw.Rule.Id),
+					fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+					fmt.Sprintf("%v", i),
+				).Set(-1)
+
 				continue
 			}
+
+			arw.Processor.Stats.GaugeQuerySeriesCount.WithLabelValues(
+				fmt.Sprintf("%v", arw.Rule.Id),
+				fmt.Sprintf("%v", arw.Processor.DatasourceId()),
+				fmt.Sprintf("%v", i),
+			).Set(float64(len(series)))
 
 			//  此条日志很重要，是告警判断的现场值
 			logger.Infof("rule_eval rid:%d req:%+v resp:%v", rule.Id, query, series)

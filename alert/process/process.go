@@ -158,16 +158,26 @@ func (p *Processor) Handle(anomalyPoints []models.AnomalyPoint, from string, inh
 		// 如果 event 被 mute 了,本质也是 fire 的状态,这里无论如何都添加到 alertingKeys 中,防止 fire 的事件自动恢复了
 		hash := event.Hash
 		alertingKeys[hash] = struct{}{}
-		isMuted, detail := mute.IsMuted(cachedRule, event, p.TargetCache, p.alertMuteCache)
+		isMuted, detail, muteId := mute.IsMuted(cachedRule, event, p.TargetCache, p.alertMuteCache)
 		if isMuted {
-			p.Stats.CounterMuteTotal.WithLabelValues(event.GroupName).Inc()
 			logger.Debugf("rule_eval:%s event:%v is muted, detail:%s", p.Key(), event, detail)
+			p.Stats.CounterMuteTotal.WithLabelValues(
+				fmt.Sprintf("%v", event.GroupName),
+				fmt.Sprintf("%v", p.rule.Id),
+				fmt.Sprintf("%v", muteId),
+				fmt.Sprintf("%v", p.datasourceId),
+			).Inc()
 			continue
 		}
 
 		if p.EventMuteHook(event) {
-			p.Stats.CounterMuteTotal.WithLabelValues(event.GroupName).Inc()
 			logger.Debugf("rule_eval:%s event:%v is muted by hook", p.Key(), event)
+			p.Stats.CounterMuteTotal.WithLabelValues(
+				fmt.Sprintf("%v", event.GroupName),
+				fmt.Sprintf("%v", p.rule.Id),
+				fmt.Sprintf("%v", 0),
+				fmt.Sprintf("%v", p.datasourceId),
+			).Inc()
 			continue
 		}
 
@@ -426,8 +436,8 @@ func (p *Processor) RecoverSingle(byRecover bool, hash string, now int64, value 
 
 func (p *Processor) handleEvent(events []*models.AlertCurEvent) {
 	var fireEvents []*models.AlertCurEvent
-	// severity 初始为 4, 一定为遇到比自己优先级高的事件
-	severity := 4
+	// severity 初始为最低优先级, 一定为遇到比自己优先级高的事件
+	severity := models.SeverityLowest
 	for _, event := range events {
 		if event == nil {
 			continue
@@ -553,6 +563,12 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 	fireMap := make(map[string]*models.AlertCurEvent)
 	pendingsUseByRecoverMap := make(map[string]*models.AlertCurEvent)
 	for _, event := range curEvents {
+		alertRule := p.alertRuleCache.Get(event.RuleId)
+		if alertRule == nil {
+			continue
+		}
+		event.NotifyRuleIDs = alertRule.NotifyRuleIds
+
 		if event.Cate == models.HOST {
 			target, exists := p.TargetCache.Get(event.TargetIdent)
 			if exists && target.EngineName != p.EngineName && !(p.ctx.IsCenter && target.EngineName == "") {

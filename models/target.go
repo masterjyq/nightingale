@@ -12,6 +12,8 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/toolkits/pkg/container/set"
+	"github.com/toolkits/pkg/slice"
+	"github.com/toolkits/pkg/logger"
 
 	"gorm.io/gorm"
 )
@@ -710,27 +712,43 @@ func DoMigrateBg(ctx *ctx.Context, bgLabelKey string) error {
 		if t.GroupId == 0 {
 			continue
 		}
-		err := DB(ctx).Transaction(func(tx *gorm.DB) error {
-			// 4.1 将 group_id 迁移至关联表
-			if err := TargetBindBgids(ctx, []string{t.Ident}, []int64{t.GroupId}, nil); err != nil {
-				return err
-			}
-			if err := TargetUpdateBgid(ctx, []string{t.Ident}, 0, false); err != nil {
-				return err
-			}
-
-			// 4.2 判断该机器是否需要新增 tag
-			if bg, ok := bgById[t.GroupId]; !ok || bg.LabelEnable == 0 ||
-				strings.Contains(t.Tags, bgLabelKey+"=") {
-				return nil
-			} else {
-				return t.AddTags(ctx, []string{bgLabelKey + "=" + bg.LabelValue})
-			}
-		})
-		if err != nil {
-			log.Printf("failed to migrate %v bg, err: %v\n", t.Ident, err)
+		// 4.1 将 group_id 迁移至关联表
+		if err := TargetBindBgids(ctx, []string{t.Ident}, []int64{t.GroupId}, nil); err != nil {
+			logger.Errorf("migrate failed to migrate bgid %v to %v, err: %v", t.GroupId, t.Ident, err)
 			continue
+		}
+
+		// 4.1.1 将 group_id 迁移至关联表
+		if err := TargetUpdateBgid(ctx, []string{t.Ident}, 0, false); err != nil {
+			logger.Errorf("migrate failed to migrate ident group id to 0, ident: %v, err: %v", t.Ident, err)
+			continue
+		}
+
+		// 4.2 判断该机器是否需要新增 tag
+		if bg, ok := bgById[t.GroupId]; !ok || bg.LabelEnable == 0 ||
+			strings.Contains(t.Tags, bgLabelKey+"=") {
+			logger.Infof("migrate ident %v has no bg label tag, skip", t.Ident)
+			continue
+		} else {
+			err := t.AddTags(ctx, []string{" " + bgLabelKey + "=" + bg.LabelValue})
+			if err != nil {
+				logger.Errorf("migrate failed to add bg label tag %v to %v, err: %v", bgLabelKey+"="+bg.LabelValue, t.Ident, err)
+				continue
+			}
+			logger.Infof("migrate add bg label tag %v to %v", bgLabelKey+"="+bg.LabelValue, t.Ident)
 		}
 	}
 	return nil
+}
+
+// 返回不存在的 idents
+func TargetNoExistIdents(ctx *ctx.Context, idents []string) ([]string, error) {
+	var existingIdents []string
+	err := ctx.DB.Table("target").Where("ident in ?", idents).Pluck("ident", &existingIdents).Error
+	if err != nil {
+		return nil, err
+	}
+
+	notExistIdents := slice.SubString(idents, existingIdents)
+	return notExistIdents, nil
 }
