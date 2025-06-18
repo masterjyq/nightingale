@@ -15,6 +15,7 @@ import (
 	"github.com/ccfos/nightingale/v6/alert/aconf"
 	"github.com/ccfos/nightingale/v6/alert/astats"
 	"github.com/ccfos/nightingale/v6/alert/common"
+	"github.com/ccfos/nightingale/v6/alert/pipeline"
 	"github.com/ccfos/nightingale/v6/alert/sender"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/models"
@@ -35,6 +36,7 @@ type Dispatch struct {
 	notifyRuleCache      *memsto.NotifyRuleCacheType
 	notifyChannelCache   *memsto.NotifyChannelCacheType
 	messageTemplateCache *memsto.MessageTemplateCacheType
+	eventProcessorCache  *memsto.EventProcessorCacheType
 
 	alerting aconf.Alerting
 
@@ -54,7 +56,7 @@ type Dispatch struct {
 func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType,
 	alertSubscribeCache *memsto.AlertSubscribeCacheType, targetCache *memsto.TargetCacheType, notifyConfigCache *memsto.NotifyConfigCacheType,
 	taskTplsCache *memsto.TaskTplCache, notifyRuleCache *memsto.NotifyRuleCacheType, notifyChannelCache *memsto.NotifyChannelCacheType,
-	messageTemplateCache *memsto.MessageTemplateCacheType, alerting aconf.Alerting, ctx *ctx.Context, astats *astats.Stats) *Dispatch {
+	messageTemplateCache *memsto.MessageTemplateCacheType, eventProcessorCache *memsto.EventProcessorCacheType, alerting aconf.Alerting, ctx *ctx.Context, astats *astats.Stats) *Dispatch {
 	notify := &Dispatch{
 		alertRuleCache:       alertRuleCache,
 		userCache:            userCache,
@@ -66,6 +68,7 @@ func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.Us
 		notifyRuleCache:      notifyRuleCache,
 		notifyChannelCache:   notifyChannelCache,
 		messageTemplateCache: messageTemplateCache,
+		eventProcessorCache:  eventProcessorCache,
 
 		alerting: alerting,
 
@@ -77,6 +80,8 @@ func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.Us
 		ctx:    ctx,
 		Astats: astats,
 	}
+
+	pipeline.Init()
 	return notify
 }
 
@@ -141,11 +146,14 @@ func (e *Dispatch) reloadTpls() error {
 	return nil
 }
 
-func (e *Dispatch) HandleEventWithNotifyRule(event *models.AlertCurEvent, isSubscribe bool) {
+func (e *Dispatch) HandleEventWithNotifyRule(eventOrigin *models.AlertCurEvent) {
 
-	if len(event.NotifyRuleIDs) > 0 {
-		for _, notifyRuleId := range event.NotifyRuleIDs {
-			logger.Infof("notify rule ids: %v, event: %+v", notifyRuleId, event)
+	if len(eventOrigin.NotifyRuleIds) > 0 {
+		for _, notifyRuleId := range eventOrigin.NotifyRuleIds {
+			// 深拷贝新的 event，避免并发修改 event 冲突
+			eventCopy := eventOrigin.DeepCopy()
+
+			logger.Infof("notify rule ids: %v, event: %+v", notifyRuleId, eventCopy)
 			notifyRule := e.notifyRuleCache.Get(notifyRuleId)
 			if notifyRule == nil {
 				continue
@@ -155,31 +163,106 @@ func (e *Dispatch) HandleEventWithNotifyRule(event *models.AlertCurEvent, isSubs
 				continue
 			}
 
+			var processors []models.Processor
+			for _, pipelineConfig := range notifyRule.PipelineConfigs {
+				if !pipelineConfig.Enable {
+					continue
+				}
+
+				eventPipeline := e.eventProcessorCache.Get(pipelineConfig.PipelineId)
+				if eventPipeline == nil {
+					logger.Warningf("notify_id: %d, event:%+v, processor not found", notifyRuleId, eventCopy)
+					continue
+				}
+
+				if !pipelineApplicable(eventPipeline, eventCopy) {
+					logger.Debugf("notify_id: %d, event:%+v, pipeline_id: %d, not applicable", notifyRuleId, eventCopy, pipelineConfig.PipelineId)
+					continue
+				}
+
+				processors = append(processors, e.eventProcessorCache.GetProcessorsById(pipelineConfig.PipelineId)...)
+			}
+
+			for _, processor := range processors {
+				logger.Infof("before processor notify_id: %d, event:%+v, processor:%+v", notifyRuleId, eventCopy, processor)
+				eventCopy, res, err := processor.Process(e.ctx, eventCopy)
+				logger.Infof("after processor notify_id: %d, event:%+v, processor:%+v, res:%v, err:%v", notifyRuleId, eventCopy, processor, res, err)
+				if eventCopy == nil {
+					logger.Warningf("notify_id: %d, event:%+v, processor:%+v, event is nil", notifyRuleId, eventCopy, processor)
+					break
+				}
+			}
+
+			if eventCopy == nil {
+				// 如果 eventCopy 为 nil，说明 eventCopy 被 processor drop 掉了, 不再发送通知
+				continue
+			}
+
+			// notify
 			for i := range notifyRule.NotifyConfigs {
-				if !NotifyRuleApplicable(&notifyRule.NotifyConfigs[i], event) {
+				if !NotifyRuleApplicable(&notifyRule.NotifyConfigs[i], eventCopy) {
 					continue
 				}
 				notifyChannel := e.notifyChannelCache.Get(notifyRule.NotifyConfigs[i].ChannelID)
 				messageTemplate := e.messageTemplateCache.Get(notifyRule.NotifyConfigs[i].TemplateID)
 				if notifyChannel == nil {
-					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{event}, notifyRuleId, fmt.Sprintf("notify_channel_id:%d", notifyRule.NotifyConfigs[i].ChannelID), "", "", errors.New("notify_channel not found"))
-					logger.Warningf("notify_id: %d, event:%+v, channel_id:%d, template_id: %d, notify_channel not found", notifyRuleId, event, notifyRule.NotifyConfigs[i].ChannelID, notifyRule.NotifyConfigs[i].TemplateID)
+					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{eventCopy}, notifyRuleId, fmt.Sprintf("notify_channel_id:%d", notifyRule.NotifyConfigs[i].ChannelID), "", "", errors.New("notify_channel not found"))
+					logger.Warningf("notify_id: %d, event:%+v, channel_id:%d, template_id: %d, notify_channel not found", notifyRuleId, eventCopy, notifyRule.NotifyConfigs[i].ChannelID, notifyRule.NotifyConfigs[i].TemplateID)
 					continue
 				}
 
 				if notifyChannel.RequestType != "flashduty" && messageTemplate == nil {
-					logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, template_id: %d, message_template not found", notifyRuleId, notifyChannel.Ident, event, notifyRule.NotifyConfigs[i].TemplateID)
-					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{event}, notifyRuleId, notifyChannel.Name, "", "", errors.New("message_template not found"))
+					logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, template_id: %d, message_template not found", notifyRuleId, notifyChannel.Ident, eventCopy, notifyRule.NotifyConfigs[i].TemplateID)
+					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{eventCopy}, notifyRuleId, notifyChannel.Name, "", "", errors.New("message_template not found"))
 
 					continue
 				}
 
 				// todo go send
 				// todo 聚合 event
-				go e.sendV2([]*models.AlertCurEvent{event}, notifyRuleId, &notifyRule.NotifyConfigs[i], notifyChannel, messageTemplate)
+				go e.sendV2([]*models.AlertCurEvent{eventCopy}, notifyRuleId, &notifyRule.NotifyConfigs[i], notifyChannel, messageTemplate)
 			}
 		}
 	}
+}
+
+func pipelineApplicable(pipeline *models.EventPipeline, event *models.AlertCurEvent) bool {
+	if pipeline == nil {
+		return true
+	}
+
+	if !pipeline.FilterEnable {
+		return true
+	}
+
+	tagMatch := true
+	if len(pipeline.LabelFilters) > 0 {
+		for i := range pipeline.LabelFilters {
+			if pipeline.LabelFilters[i].Func == "" {
+				pipeline.LabelFilters[i].Func = pipeline.LabelFilters[i].Op
+			}
+		}
+
+		tagFilters, err := models.ParseTagFilter(pipeline.LabelFilters)
+		if err != nil {
+			logger.Errorf("pipeline applicable failed to parse tag filter: %v event:%+v pipeline:%+v", err, event, pipeline)
+			return false
+		}
+		tagMatch = common.MatchTags(event.TagsMap, tagFilters)
+	}
+
+	attributesMatch := true
+	if len(pipeline.AttrFilters) > 0 {
+		tagFilters, err := models.ParseTagFilter(pipeline.AttrFilters)
+		if err != nil {
+			logger.Errorf("pipeline applicable failed to parse tag filter: %v event:%+v pipeline:%+v err:%v", tagFilters, event, pipeline, err)
+			return false
+		}
+
+		attributesMatch = common.MatchTags(event.JsonTagsAndValue(), tagFilters)
+	}
+
+	return tagMatch && attributesMatch
 }
 
 func NotifyRuleApplicable(notifyConfig *models.NotifyConfig, event *models.AlertCurEvent) bool {
@@ -359,6 +442,10 @@ func (e *Dispatch) sendV2(events []*models.AlertCurEvent, notifyRuleId int64, no
 
 	switch notifyChannel.RequestType {
 	case "flashduty":
+		if len(flashDutyChannelIDs) == 0 {
+			flashDutyChannelIDs = []int64{0} // 如果 flashduty 通道没有配置，则使用 0, 给 SendFlashDuty 判断使用, 不给 flashduty 传 channel_id 参数
+		}
+
 		for i := range flashDutyChannelIDs {
 			respBody, err := notifyChannel.SendFlashDuty(events, flashDutyChannelIDs[i], e.notifyChannelCache.GetHttpClient(notifyChannel.ID))
 			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, IntegrationUrl: %v dutychannel_id: %v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, flashDutyChannelIDs[i], respBody, err)
@@ -416,11 +503,6 @@ func (e *Dispatch) HandleEventNotify(event *models.AlertCurEvent, isSubscribe bo
 		return
 	}
 
-	if e.blockEventNotify(rule, event) {
-		logger.Infof("block event notify: rule_id:%d event:%+v", rule.Id, event)
-		return
-	}
-
 	fillUsers(event, e.userCache, e.userGroupCache)
 
 	var (
@@ -448,33 +530,13 @@ func (e *Dispatch) HandleEventNotify(event *models.AlertCurEvent, isSubscribe bo
 		notifyTarget.AndMerge(handler(rule, event, notifyTarget, e))
 	}
 
-	// 处理事件发送,这里用一个goroutine处理一个event的所有发送事件
-	go e.HandleEventWithNotifyRule(event, isSubscribe)
+	go e.HandleEventWithNotifyRule(event)
 	go e.Send(rule, event, notifyTarget, isSubscribe)
 
 	// 如果是不是订阅规则出现的event, 则需要处理订阅规则的event
 	if !isSubscribe {
 		e.handleSubs(event)
 	}
-}
-
-func (e *Dispatch) blockEventNotify(rule *models.AlertRule, event *models.AlertCurEvent) bool {
-	ruleType := rule.GetRuleType()
-
-	// 若为机器则先看机器是否删除
-	if ruleType == models.HOST {
-		host, ok := e.targetCache.Get(event.TagsMap["ident"])
-		if !ok || host == nil {
-			return true
-		}
-	}
-
-	// 恢复通知，检测规则配置是否改变
-	// if event.IsRecovered && event.RuleHash != rule.Hash() {
-	// 	return true
-	// }
-
-	return false
 }
 
 func (e *Dispatch) handleSubs(event *models.AlertCurEvent) {
@@ -645,6 +707,11 @@ func (e *Dispatch) HandleIbex(rule *models.AlertRule, event *models.AlertCurEven
 		TaskTpls []*models.Tpl `json:"task_tpls"`
 	}
 	json.Unmarshal([]byte(rule.RuleConfig), &ruleConfig)
+
+	if event.IsRecovered {
+		// 恢复事件不需要走故障自愈的逻辑
+		return
+	}
 
 	for _, t := range ruleConfig.TaskTpls {
 		if t.TplId == 0 {

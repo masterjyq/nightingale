@@ -53,6 +53,20 @@ func init() {
 		PluginType:     "ck",
 		PluginTypeName: "ClickHouse",
 	}
+
+	DatasourceTypes[5] = DatasourceType{
+		Id:             5,
+		Category:       "timeseries",
+		PluginType:     "mysql",
+		PluginTypeName: "MySQL",
+	}
+
+	DatasourceTypes[6] = DatasourceType{
+		Id:             6,
+		Category:       "timeseries",
+		PluginType:     "pgsql",
+		PluginTypeName: "PostgreSQL",
+	}
 }
 
 type NewDatasrouceFn func(settings map[string]interface{}) (Datasource, error)
@@ -98,6 +112,7 @@ func GetDatasourceByType(typ string, settings map[string]interface{}) (Datasourc
 type DatasourceInfo struct {
 	Id             int64                  `json:"id"`
 	Name           string                 `json:"name"`
+	Identifier     string                 `json:"identifier"`
 	Description    string                 `json:"description"`
 	ClusterName    string                 `json:"cluster_name"`
 	Category       string                 `json:"category"`

@@ -121,6 +121,25 @@ func (u *User) IsAdmin() bool {
 	return false
 }
 
+// has group permission
+func (u *User) CheckGroupPermission(ctx *ctx.Context, groupIds []int64) error {
+	if !u.IsAdmin() {
+		ids, err := MyGroupIdsMap(ctx, u.Id)
+		if err != nil {
+			return err
+		}
+
+		for _, id := range groupIds {
+			if _, ok := ids[id]; ok {
+				return nil
+			}
+		}
+
+		return errors.New("forbidden")
+	}
+	return nil
+}
+
 func (u *User) Verify() error {
 	u.Username = strings.TrimSpace(u.Username)
 
@@ -531,7 +550,7 @@ func UserTotal(ctx *ctx.Context, query string, stime, etime int64) (num int64, e
 }
 
 func UserGets(ctx *ctx.Context, query string, limit, offset int, stime, etime int64,
-	order string, desc bool) ([]User, error) {
+	order string, desc bool, usernames, phones, emails []string) ([]User, error) {
 
 	session := DB(ctx)
 
@@ -546,6 +565,18 @@ func UserGets(ctx *ctx.Context, query string, limit, offset int, stime, etime in
 	}
 
 	session = session.Order(order)
+
+	if len(usernames) > 0 {
+		session = session.Where("username in (?)", usernames)
+	}
+
+	if len(phones) > 0 {
+		session = session.Where("phone in (?)", phones)
+	}
+
+	if len(emails) > 0 {
+		session = session.Where("email in (?)", emails)
+	}
 
 	if query != "" {
 		q := "%" + query + "%"

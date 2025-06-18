@@ -37,33 +37,35 @@ func (v *AlertAggrView) Verify() error {
 		return errors.New("rule is blank")
 	}
 
-	var validFields = []string{
-		"cluster",
-		"group_id",
-		"group_name",
-		"rule_id",
-		"rule_name",
-		"severity",
-		"runbook_url",
-		"target_ident",
-		"target_note",
-	}
-
-	arr := strings.Split(v.Rule, "::")
-	for i := 0; i < len(arr); i++ {
-		pair := strings.Split(arr[i], ":")
-		if len(pair) != 2 {
-			return errors.New("rule invalid")
+	if !strings.Contains(v.Rule, "{{") {
+		var validFields = []string{
+			"cluster",
+			"group_id",
+			"group_name",
+			"rule_id",
+			"rule_name",
+			"severity",
+			"runbook_url",
+			"target_ident",
+			"target_note",
 		}
 
-		if !(pair[0] == "field" || pair[0] == "tagkey") {
-			return errors.New("rule invalid")
-		}
+		arr := strings.Split(v.Rule, "::")
+		for i := 0; i < len(arr); i++ {
+			pair := strings.Split(arr[i], ":")
+			if len(pair) != 2 {
+				return errors.New("rule invalid")
+			}
 
-		if pair[0] == "field" {
-			// 只支持有限的field
-			if !slice.ContainsString(validFields, pair[1]) {
-				return fmt.Errorf("unsupported field: %s", pair[1])
+			if !(pair[0] == "field" || pair[0] == "tagkey") {
+				return errors.New("rule invalid")
+			}
+
+			if pair[0] == "field" {
+				// 只支持有限的field
+				if !slice.ContainsString(validFields, pair[1]) {
+					return fmt.Errorf("unsupported field: %s", pair[1])
+				}
 			}
 		}
 	}
@@ -136,4 +138,15 @@ func AlertAggrViewGet(ctx *ctx.Context, where string, args ...interface{}) (*Ale
 	}
 
 	return lst[0], nil
+}
+
+func GetAlertAggrViewByViewID(ctx *ctx.Context, viewID int64) (*AlertAggrView, error) {
+	view, err := AlertAggrViewGet(ctx, "id = ?", viewID)
+	if err != nil {
+		return nil, err
+	}
+	if view == nil {
+		return nil, errors.New("alert aggr view not found")
+	}
+	return view, nil
 }

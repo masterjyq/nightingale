@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/toolkits/pkg/ginx"
+	"github.com/toolkits/pkg/logger"
 	"golang.org/x/exp/slices"
 )
 
@@ -56,7 +58,7 @@ func (rt *Router) alertHisEventsList(c *gin.Context) {
 
 	ruleId := ginx.QueryInt64(c, "rid", 0)
 
-	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView)
+	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView, false)
 	ginx.Dangerous(err)
 
 	total, err := models.AlertHisEventTotal(rt.Ctx, prods, bgids, stime, etime, severity,
@@ -78,16 +80,56 @@ func (rt *Router) alertHisEventsList(c *gin.Context) {
 	}, nil)
 }
 
+type alertHisEventsDeleteForm struct {
+	Severities []int `json:"severities"`
+	Timestamp  int64 `json:"timestamp" binding:"required"`
+}
+
+func (rt *Router) alertHisEventsDelete(c *gin.Context) {
+	var f alertHisEventsDeleteForm
+	ginx.BindJSON(c, &f)
+	// 校验
+	if f.Timestamp == 0 {
+		ginx.Bomb(http.StatusBadRequest, "timestamp parameter is required")
+		return
+	}
+
+	user := c.MustGet("user").(*models.User)
+
+	// 启动后台清理任务
+	go func() {
+		limit := 100
+		for {
+			n, err := models.AlertHisEventBatchDelete(rt.Ctx, f.Timestamp, f.Severities, limit)
+			if err != nil {
+				logger.Errorf("Failed to delete alert history events: operator=%s, timestamp=%d, severities=%v, error=%v",
+					user.Username, f.Timestamp, f.Severities, err)
+				break
+			}
+			logger.Debugf("Successfully deleted alert history events: operator=%s, timestamp=%d, severities=%v, deleted=%d",
+				user.Username, f.Timestamp, f.Severities, n)
+			if n < int64(limit) {
+				break // 已经删完
+			}
+
+			time.Sleep(100 * time.Millisecond) // 防止锁表
+		}
+	}()
+	ginx.NewRender(c).Message("Alert history events deletion started")
+}
+
 func (rt *Router) alertHisEventGet(c *gin.Context) {
 	eid := ginx.UrlParamInt64(c, "eid")
 	event, err := models.AlertHisEventGetById(rt.Ctx, eid)
 	ginx.Dangerous(err)
-
 	if event == nil {
 		ginx.Bomb(404, "No such alert event")
 	}
 
-	if !rt.Center.AnonymousAccess.AlertDetail && rt.Center.EventHistoryGroupView {
+	hasPermission := HasPermission(rt.Ctx, c, "event", fmt.Sprintf("%d", eid), rt.Center.AnonymousAccess.AlertDetail)
+	if !hasPermission {
+		rt.auth()(c)
+		rt.user()(c)
 		rt.bgroCheck(c, event.GroupId)
 	}
 
@@ -96,46 +138,54 @@ func (rt *Router) alertHisEventGet(c *gin.Context) {
 		event.RuleConfigJson = ruleConfig
 	}
 
+	event.NotifyVersion, err = GetEventNotifyVersion(rt.Ctx, event.RuleId, event.NotifyRuleIds)
+	ginx.Dangerous(err)
+
+	event.NotifyRules, err = GetEventNorifyRuleNames(rt.Ctx, event.NotifyRuleIds)
 	ginx.NewRender(c).Data(event, err)
 }
 
-func GetBusinessGroupIds(c *gin.Context, ctx *ctx.Context, eventHistoryGroupView bool) ([]int64, error) {
+func GetBusinessGroupIds(c *gin.Context, ctx *ctx.Context, onlySelfGroupView bool, myGroups bool) ([]int64, error) {
 	bgid := ginx.QueryInt64(c, "bgid", 0)
 	var bgids []int64
 
-	if !eventHistoryGroupView || strings.HasPrefix(c.Request.URL.Path, "/v1") {
+	if strings.HasPrefix(c.Request.URL.Path, "/v1") {
+		// 如果请求路径以 /v1 开头，不查询用户信息
 		if bgid > 0 {
 			return []int64{bgid}, nil
 		}
+
 		return bgids, nil
 	}
 
 	user := c.MustGet("user").(*models.User)
-	if user.IsAdmin() {
+	if myGroups || (onlySelfGroupView && !user.IsAdmin()) {
+		// 1. 页面上勾选了我的业务组，需要查询用户所属的业务组
+		// 2. 如果 onlySelfGroupView 为 true，表示只允许查询用户所属的业务组
+		bussGroupIds, err := models.MyBusiGroupIds(ctx, user.Id)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(bussGroupIds) == 0 {
+			// 如果没查到用户属于任何业务组，需要返回一个0，否则会导致查询到全部告警历史
+			return []int64{0}, nil
+		}
+
 		if bgid > 0 {
+			if !slices.Contains(bussGroupIds, bgid) && !user.IsAdmin() {
+				return nil, fmt.Errorf("business group ID not allowed")
+			}
+
 			return []int64{bgid}, nil
 		}
-		return bgids, nil
-	}
 
-	bussGroupIds, err := models.MyBusiGroupIds(ctx, user.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(bussGroupIds) == 0 {
-		// 如果没查到用户属于任何业务组，需要返回一个0，否则会导致查询到全部告警历史
-		return []int64{0}, nil
-	}
-
-	if bgid > 0 && !slices.Contains(bussGroupIds, bgid) {
-		return nil, fmt.Errorf("business group ID not allowed")
+		return bussGroupIds, nil
 	}
 
 	if bgid > 0 {
-		// Pass filter parameters, priority to use
 		return []int64{bgid}, nil
 	}
 
-	return bussGroupIds, nil
+	return bgids, nil
 }

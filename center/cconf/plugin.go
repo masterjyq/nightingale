@@ -25,4 +25,22 @@ var Plugins = []Plugin{
 		Type:     "tdengine",
 		TypeName: "TDengine",
 	},
+	{
+		Id:       5,
+		Category: "logging",
+		Type:     "ck",
+		TypeName: "ClickHouse",
+	},
+	{
+		Id:       6,
+		Category: "timeseries",
+		Type:     "mysql",
+		TypeName: "MySQL",
+	},
+	{
+		Id:       7,
+		Category: "timeseries",
+		Type:     "pgsql",
+		TypeName: "PostgreSQL",
+	},
 }

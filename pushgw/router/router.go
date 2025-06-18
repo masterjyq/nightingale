@@ -11,9 +11,11 @@ import (
 	"github.com/ccfos/nightingale/v6/center/metas"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
+	"github.com/ccfos/nightingale/v6/pkg/ginx"
 	"github.com/ccfos/nightingale/v6/pkg/httpx"
 	"github.com/ccfos/nightingale/v6/pushgw/idents"
 	"github.com/ccfos/nightingale/v6/pushgw/pconf"
+	"github.com/ccfos/nightingale/v6/pushgw/pstat"
 	"github.com/ccfos/nightingale/v6/pushgw/writer"
 )
 
@@ -42,8 +44,7 @@ func stat() gin.HandlerFunc {
 		method := c.Request.Method
 		labels := []string{"pushgw", code, c.FullPath(), method}
 
-		RequestCounter.WithLabelValues(labels...).Inc()
-		RequestDuration.WithLabelValues(labels...).Observe(float64(time.Since(start).Seconds()))
+		pstat.RequestDuration.WithLabelValues(labels...).Observe(float64(time.Since(start).Seconds()))
 	}
 }
 
@@ -75,8 +76,6 @@ func (rt *Router) Config(r *gin.Engine) {
 		return
 	}
 
-	registerMetrics()
-
 	r.Use(stat())
 	// datadog url: http://n9e-pushgw.foo.com/datadog
 	// use apiKey not basic auth
@@ -88,7 +87,22 @@ func (rt *Router) Config(r *gin.Engine) {
 
 	if len(rt.HTTP.APIForAgent.BasicAuth) > 0 {
 		// enable basic auth
-		auth := gin.BasicAuth(rt.HTTP.APIForAgent.BasicAuth)
+		accounts := make(ginx.Accounts, 0)
+		for username, password := range rt.HTTP.APIForAgent.BasicAuth {
+			accounts = append(accounts, ginx.Account{
+				User:     username,
+				Password: password,
+			})
+		}
+
+		for username, password := range rt.HTTP.APIForService.BasicAuth {
+			accounts = append(accounts, ginx.Account{
+				User:     username,
+				Password: password,
+			})
+		}
+
+		auth := ginx.BasicAuth(accounts)
 		r.POST("/opentsdb/put", auth, rt.openTSDBPut)
 		r.POST("/openfalcon/push", auth, rt.falconPush)
 		r.POST("/prometheus/v1/write", auth, rt.remoteWrite)

@@ -15,6 +15,8 @@ type NotifyRule struct {
 	Enable       bool    `json:"enable"`                                // 启用状态
 	UserGroupIds []int64 `json:"user_group_ids" gorm:"serializer:json"` // 告警组ID
 
+	PipelineConfigs []PipelineConfig `json:"pipeline_configs" gorm:"serializer:json"`
+
 	// 通知配置
 	NotifyConfigs []NotifyConfig `json:"notify_configs" gorm:"serializer:json"`
 
@@ -22,6 +24,11 @@ type NotifyRule struct {
 	CreateBy string `json:"create_by"`
 	UpdateAt int64  `json:"update_at"`
 	UpdateBy string `json:"update_by"`
+}
+
+type PipelineConfig struct {
+	PipelineId int64 `json:"pipeline_id"`
+	Enable     bool  `json:"enable"`
 }
 
 func (r *NotifyRule) TableName() string {
@@ -209,7 +216,7 @@ func NotifyRulesGet(ctx *ctx.Context, where string, args ...interface{}) ([]*Not
 	if where != "" && len(args) > 0 {
 		session = session.Where(where, args...)
 	}
-	err := session.Find(&lst).Error
+	err := session.Order("name asc").Find(&lst).Error
 	if err != nil {
 		return nil, err
 	}

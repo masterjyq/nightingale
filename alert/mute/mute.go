@@ -9,6 +9,7 @@ import (
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/models"
 
+	"github.com/pkg/errors"
 	"github.com/toolkits/pkg/logger"
 )
 
@@ -43,6 +44,12 @@ func TimeSpanMuteStrategy(rule *models.AlertRule, event *models.AlertCurEvent) b
 	tm := time.Unix(event.TriggerTime, 0)
 	triggerTime := tm.Format("15:04")
 	triggerWeek := strconv.Itoa(int(tm.Weekday()))
+
+	if rule.EnableDaysOfWeek == "" {
+		// 如果规则没有配置生效时间，则默认全天生效
+
+		return false
+	}
 
 	enableStime := strings.Fields(rule.EnableStime)
 	enableEtime := strings.Fields(rule.EnableEtime)
@@ -129,7 +136,8 @@ func EventMuteStrategy(event *models.AlertCurEvent, alertMuteCache *memsto.Alert
 	}
 
 	for i := 0; i < len(mutes); i++ {
-		if matchMute(event, mutes[i]) {
+		matched, _ := MatchMute(event, mutes[i])
+		if matched {
 			return true, mutes[i].Id
 		}
 	}
@@ -137,14 +145,10 @@ func EventMuteStrategy(event *models.AlertCurEvent, alertMuteCache *memsto.Alert
 	return false, 0
 }
 
-// matchMute 如果传入了clock这个可选参数，就表示使用这个clock表示的时间，否则就从event的字段中取TriggerTime
-func matchMute(event *models.AlertCurEvent, mute *models.AlertMute, clock ...int64) bool {
+// MatchMute 如果传入了clock这个可选参数，就表示使用这个clock表示的时间，否则就从event的字段中取TriggerTime
+func MatchMute(event *models.AlertCurEvent, mute *models.AlertMute, clock ...int64) (bool, error) {
 	if mute.Disabled == 1 {
-		return false
-	}
-	ts := event.TriggerTime
-	if len(clock) > 0 {
-		ts = clock[0]
+		return false, errors.New("mute is disabled")
 	}
 
 	// 如果不是全局的，判断 匹配的 datasource id
@@ -156,42 +160,26 @@ func matchMute(event *models.AlertCurEvent, mute *models.AlertMute, clock ...int
 
 		// 判断 event.datasourceId 是否包含在 idm 中
 		if _, has := idm[event.DatasourceId]; !has {
-			return false
+			return false, errors.New("datasource id not match")
 		}
 	}
 
-	var matchTime bool
 	if mute.MuteTimeType == models.TimeRange {
-		if ts < mute.Btime || ts > mute.Etime {
-			return false
+		if !mute.IsWithinTimeRange(event.TriggerTime) {
+			return false, errors.New("event trigger time not within mute time range")
 		}
-		matchTime = true
 	} else if mute.MuteTimeType == models.Periodic {
-		tm := time.Unix(event.TriggerTime, 0)
-		triggerTime := tm.Format("15:04")
-		triggerWeek := strconv.Itoa(int(tm.Weekday()))
-
-		for i := 0; i < len(mute.PeriodicMutesJson); i++ {
-			if strings.Contains(mute.PeriodicMutesJson[i].EnableDaysOfWeek, triggerWeek) {
-				if mute.PeriodicMutesJson[i].EnableStime == mute.PeriodicMutesJson[i].EnableEtime || (mute.PeriodicMutesJson[i].EnableStime == "00:00" && mute.PeriodicMutesJson[i].EnableEtime == "23:59") {
-					matchTime = true
-					break
-				} else if mute.PeriodicMutesJson[i].EnableStime < mute.PeriodicMutesJson[i].EnableEtime {
-					if triggerTime >= mute.PeriodicMutesJson[i].EnableStime && triggerTime < mute.PeriodicMutesJson[i].EnableEtime {
-						matchTime = true
-						break
-					}
-				} else {
-					if triggerTime >= mute.PeriodicMutesJson[i].EnableStime || triggerTime < mute.PeriodicMutesJson[i].EnableEtime {
-						matchTime = true
-						break
-					}
-				}
-			}
+		ts := event.TriggerTime
+		if len(clock) > 0 {
+			ts = clock[0]
 		}
-	}
-	if !matchTime {
-		return false
+
+		if !mute.IsWithinPeriodicMute(ts) {
+			return false, errors.New("event trigger time not within periodic mute range")
+		}
+	} else {
+		logger.Warningf("mute time type invalid, %d", mute.MuteTimeType)
+		return false, errors.New("mute time type invalid")
 	}
 
 	var matchSeverity bool
@@ -207,12 +195,14 @@ func matchMute(event *models.AlertCurEvent, mute *models.AlertMute, clock ...int
 	}
 
 	if !matchSeverity {
-		return false
+		return false, errors.New("event severity not match mute severity")
 	}
 
 	if mute.ITags == nil || len(mute.ITags) == 0 {
-		return true
+		return true, nil
 	}
-
-	return common.MatchTags(event.TagsMap, mute.ITags)
+	if !common.MatchTags(event.TagsMap, mute.ITags) {
+		return false, errors.New("event tags not match mute tags")
+	}
+	return true, nil
 }

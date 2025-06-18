@@ -9,6 +9,8 @@ import (
 	"github.com/ccfos/nightingale/v6/datasource"
 	_ "github.com/ccfos/nightingale/v6/datasource/ck"
 	"github.com/ccfos/nightingale/v6/datasource/es"
+	_ "github.com/ccfos/nightingale/v6/datasource/mysql"
+	_ "github.com/ccfos/nightingale/v6/datasource/postgresql"
 	"github.com/ccfos/nightingale/v6/dskit/tdengine"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
@@ -47,6 +49,7 @@ var PromDefaultDatasourceId int64
 func getDatasourcesFromDBLoop(ctx *ctx.Context, fromAPI bool) {
 	for {
 		if !fromAPI {
+			foundDefaultDatasource := false
 			items, err := models.GetDatasources(ctx)
 			if err != nil {
 				logger.Errorf("get datasource from database fail: %v", err)
@@ -58,6 +61,7 @@ func getDatasourcesFromDBLoop(ctx *ctx.Context, fromAPI bool) {
 			for _, item := range items {
 				if item.PluginType == "prometheus" && item.IsDefault {
 					atomic.StoreInt64(&PromDefaultDatasourceId, item.Id)
+					foundDefaultDatasource = true
 				}
 
 				logger.Debugf("get datasource: %+v", item)
@@ -90,6 +94,12 @@ func getDatasourcesFromDBLoop(ctx *ctx.Context, fromAPI bool) {
 				}
 				dss = append(dss, ds)
 			}
+
+			if !foundDefaultDatasource && atomic.LoadInt64(&PromDefaultDatasourceId) != 0 {
+				logger.Debugf("no default datasource found")
+				atomic.StoreInt64(&PromDefaultDatasourceId, 0)
+			}
+
 			PutDatasources(dss)
 		} else {
 			FromAPIHook()
@@ -183,7 +193,14 @@ func PutDatasources(items []datasource.DatasourceInfo) {
 		ids = append(ids, item.Id)
 
 		// 异步初始化 client 不然数据源同步的会很慢
-		go DsCache.Put(typ, item.Id, ds)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Errorf("panic in datasource item: %+v panic:%v", item, r)
+				}
+			}()
+			DsCache.Put(typ, item.Id, ds)
+		}()
 	}
 
 	logger.Debugf("get plugin by type success Ids:%v", ids)

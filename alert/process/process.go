@@ -14,14 +14,13 @@ import (
 	"github.com/ccfos/nightingale/v6/alert/common"
 	"github.com/ccfos/nightingale/v6/alert/dispatch"
 	"github.com/ccfos/nightingale/v6/alert/mute"
+	"github.com/ccfos/nightingale/v6/alert/pipeline/processor/relabel"
 	"github.com/ccfos/nightingale/v6/alert/queue"
 	"github.com/ccfos/nightingale/v6/memsto"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/tplx"
-	"github.com/ccfos/nightingale/v6/pushgw/writer"
 
-	"github.com/prometheus/prometheus/prompb"
 	"github.com/robfig/cron/v3"
 	"github.com/toolkits/pkg/logger"
 	"github.com/toolkits/pkg/str"
@@ -61,11 +60,9 @@ type Processor struct {
 	pendingsUseByRecover *AlertCurEventMap
 	inhibit              bool
 
-	tagsMap    map[string]string
-	tagsArr    []string
-	target     string
-	targetNote string
-	groupName  string
+	tagsMap   map[string]string
+	tagsArr   []string
+	groupName string
 
 	alertRuleCache          *memsto.AlertRuleCacheType
 	TargetCache             *memsto.TargetCacheType
@@ -154,7 +151,7 @@ func (p *Processor) Handle(anomalyPoints []models.AnomalyPoint, from string, inh
 	eventsMap := make(map[string][]*models.AlertCurEvent)
 	for _, anomalyPoint := range anomalyPoints {
 		event := p.BuildEvent(anomalyPoint, from, now, ruleHash)
-		event.NotifyRuleIDs = cachedRule.NotifyRuleIds
+		event.NotifyRuleIds = cachedRule.NotifyRuleIds
 		// 如果 event 被 mute 了,本质也是 fire 的状态,这里无论如何都添加到 alertingKeys 中,防止 fire 的事件自动恢复了
 		hash := event.Hash
 		alertingKeys[hash] = struct{}{}
@@ -196,7 +193,7 @@ func (p *Processor) Handle(anomalyPoints []models.AnomalyPoint, from string, inh
 
 func (p *Processor) BuildEvent(anomalyPoint models.AnomalyPoint, from string, now int64, ruleHash string) *models.AlertCurEvent {
 	p.fillTags(anomalyPoint)
-	p.mayHandleIdent()
+
 	hash := Hash(p.rule.Id, p.datasourceId, anomalyPoint)
 	ds := p.datasourceCache.GetById(p.datasourceId)
 	var dsName string
@@ -216,8 +213,6 @@ func (p *Processor) BuildEvent(anomalyPoint models.AnomalyPoint, from string, no
 	event.DatasourceId = p.datasourceId
 	event.Cluster = dsName
 	event.Hash = hash
-	event.TargetIdent = p.target
-	event.TargetNote = p.targetNote
 	event.TriggerValue = anomalyPoint.ReadableValue()
 	event.TriggerValues = anomalyPoint.Values
 	event.TriggerValuesJson = models.EventTriggerValues{ValuesWithUnit: anomalyPoint.ValuesUnit}
@@ -249,15 +244,6 @@ func (p *Processor) BuildEvent(anomalyPoint models.AnomalyPoint, from string, no
 		logger.Warningf("unmarshal annotations json failed: %v, rule: %d", err, p.rule.Id)
 	}
 
-	if p.target != "" {
-		if pt, exist := p.TargetCache.Get(p.target); exist {
-			pt.GroupNames = p.BusiGroupCache.GetNamesByBusiGroupIds(pt.GroupIds)
-			event.Target = pt
-		} else {
-			logger.Infof("Target[ident: %s] doesn't exist in cache.", p.target)
-		}
-	}
-
 	if event.TriggerValues != "" && strings.Count(event.TriggerValues, "$") > 1 {
 		// TriggerValues 有多个变量，将多个变量都放到 TriggerValue 中
 		event.TriggerValue = event.TriggerValues
@@ -271,6 +257,19 @@ func (p *Processor) BuildEvent(anomalyPoint models.AnomalyPoint, from string, no
 
 	// 生成事件之后，立马进程 relabel 处理
 	Relabel(p.rule, event)
+
+	// 放到 Relabel(p.rule, event) 下面，为了处理 relabel 之后，标签里才出现 ident 的情况
+	p.mayHandleIdent(event)
+
+	if event.TargetIdent != "" {
+		if pt, exist := p.TargetCache.Get(event.TargetIdent); exist {
+			pt.GroupNames = p.BusiGroupCache.GetNamesByBusiGroupIds(pt.GroupIds)
+			event.Target = pt
+		} else {
+			logger.Infof("fill event target error, ident: %s doesn't exist in cache.", event.TargetIdent)
+		}
+	}
+
 	return event
 }
 
@@ -279,44 +278,15 @@ func Relabel(rule *models.AlertRule, event *models.AlertCurEvent) {
 		return
 	}
 
+	// need to keep the original label
+	event.OriginalTags = event.Tags
+	event.OriginalTagsJSON = event.TagsJSON
+
 	if len(rule.EventRelabelConfig) == 0 {
 		return
 	}
 
-	// need to keep the original label
-	event.OriginalTags = event.Tags
-	event.OriginalTagsJSON = make([]string, len(event.TagsJSON))
-
-	labels := make([]prompb.Label, len(event.TagsJSON))
-	for i, tag := range event.TagsJSON {
-		label := strings.SplitN(tag, "=", 2)
-		event.OriginalTagsJSON[i] = tag
-		labels[i] = prompb.Label{Name: label[0], Value: label[1]}
-	}
-
-	for i := 0; i < len(rule.EventRelabelConfig); i++ {
-		if rule.EventRelabelConfig[i].Replacement == "" {
-			rule.EventRelabelConfig[i].Replacement = "$1"
-		}
-
-		if rule.EventRelabelConfig[i].Separator == "" {
-			rule.EventRelabelConfig[i].Separator = ";"
-		}
-
-		if rule.EventRelabelConfig[i].Regex == "" {
-			rule.EventRelabelConfig[i].Regex = "(.*)"
-		}
-	}
-
-	// relabel process
-	relabels := writer.Process(labels, rule.EventRelabelConfig...)
-	event.TagsJSON = make([]string, len(relabels))
-	event.TagsMap = make(map[string]string, len(relabels))
-	for i, label := range relabels {
-		event.TagsJSON[i] = fmt.Sprintf("%s=%s", label.Name, label.Value)
-		event.TagsMap[label.Name] = label.Value
-	}
-	event.Tags = strings.Join(event.TagsJSON, ",,")
+	relabel.EventRelabel(event, rule.EventRelabelConfig)
 }
 
 func (p *Processor) HandleRecover(alertingKeys map[string]struct{}, now int64, inhibit bool) {
@@ -567,7 +537,7 @@ func (p *Processor) RecoverAlertCurEventFromDb() {
 		if alertRule == nil {
 			continue
 		}
-		event.NotifyRuleIDs = alertRule.NotifyRuleIds
+		event.NotifyRuleIds = alertRule.NotifyRuleIds
 
 		if event.Cate == models.HOST {
 			target, exists := p.TargetCache.Get(event.TargetIdent)
@@ -641,19 +611,19 @@ func (p *Processor) fillTags(anomalyPoint models.AnomalyPoint) {
 	p.tagsArr = labelMapToArr(tagsMap)
 }
 
-func (p *Processor) mayHandleIdent() {
+func (p *Processor) mayHandleIdent(event *models.AlertCurEvent) {
 	// handle ident
-	if ident, has := p.tagsMap["ident"]; has {
+	if ident, has := event.TagsMap["ident"]; has {
 		if target, exists := p.TargetCache.Get(ident); exists {
-			p.target = target.Ident
-			p.targetNote = target.Note
+			event.TargetIdent = target.Ident
+			event.TargetNote = target.Note
 		} else {
-			p.target = ident
-			p.targetNote = ""
+			event.TargetIdent = ident
+			event.TargetNote = ""
 		}
 	} else {
-		p.target = ""
-		p.targetNote = ""
+		event.TargetIdent = ""
+		event.TargetNote = ""
 	}
 }
 

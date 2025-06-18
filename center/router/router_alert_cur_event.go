@@ -1,50 +1,54 @@
 package router
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/ccfos/nightingale/v6/models"
+	"github.com/ccfos/nightingale/v6/pkg/ctx"
+	"github.com/ccfos/nightingale/v6/pkg/strx"
 
 	"github.com/gin-gonic/gin"
 	"github.com/toolkits/pkg/ginx"
 )
 
-func parseAggrRules(c *gin.Context) []*models.AggrRule {
-	aggrRules := strings.Split(ginx.QueryStr(c, "rule", ""), "::") // e.g. field:group_name::field:severity::tagkey:ident
-
-	if len(aggrRules) == 0 {
-		ginx.Bomb(http.StatusBadRequest, "rule empty")
+func getUserGroupIds(ctx *gin.Context, rt *Router, myGroups bool) ([]int64, error) {
+	if !myGroups {
+		return nil, nil
 	}
-
-	rules := make([]*models.AggrRule, len(aggrRules))
-	for i := 0; i < len(aggrRules); i++ {
-		pair := strings.Split(aggrRules[i], ":")
-		if len(pair) != 2 {
-			ginx.Bomb(http.StatusBadRequest, "rule invalid")
-		}
-
-		if !(pair[0] == "field" || pair[0] == "tagkey") {
-			ginx.Bomb(http.StatusBadRequest, "rule invalid")
-		}
-
-		rules[i] = &models.AggrRule{
-			Type:  pair[0],
-			Value: pair[1],
-		}
-	}
-
-	return rules
+	me := ctx.MustGet("user").(*models.User)
+	return models.MyGroupIds(rt.Ctx, me.Id)
 }
 
 func (rt *Router) alertCurEventsCard(c *gin.Context) {
 	stime, etime := getTimeRange(c)
-	severity := ginx.QueryInt(c, "severity", -1)
+	severity := strx.IdsInt64ForAPI(ginx.QueryStr(c, "severity", ""), ",")
 	query := ginx.QueryStr(c, "query", "")
+	myGroups := ginx.QueryBool(c, "my_groups", false) // 是否只看自己组，默认false
+
+	var gids []int64
+	var err error
+	if myGroups {
+		gids, err = getUserGroupIds(c, rt, myGroups)
+		ginx.Dangerous(err)
+		if len(gids) == 0 {
+			gids = append(gids, -1)
+		}
+	}
+
+	viewId := ginx.QueryInt64(c, "view_id")
+
+	alertView, err := models.GetAlertAggrViewByViewID(rt.Ctx, viewId)
+	ginx.Dangerous(err)
+
+	if alertView == nil {
+		ginx.Bomb(http.StatusNotFound, "alert aggr view not found")
+	}
+
 	dsIds := queryDatasourceIds(c)
-	rules := parseAggrRules(c)
 
 	prod := ginx.QueryStr(c, "prods", "")
 	if prod == "" {
@@ -61,17 +65,18 @@ func (rt *Router) alertCurEventsCard(c *gin.Context) {
 		cates = strings.Split(cate, ",")
 	}
 
-	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView)
+	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView, myGroups)
 	ginx.Dangerous(err)
 
 	// 最多获取50000个，获取太多也没啥意义
 	list, err := models.AlertCurEventsGet(rt.Ctx, prods, bgids, stime, etime, severity, dsIds,
-		cates, 0, query, 50000, 0)
+		cates, 0, query, 50000, 0, []int64{})
 	ginx.Dangerous(err)
 
 	cardmap := make(map[string]*AlertCard)
 	for _, event := range list {
-		title := event.GenCardTitle(rules)
+		title, err := event.GenCardTitle(alertView.Rule)
+		ginx.Dangerous(err)
 		if _, has := cardmap[title]; has {
 			cardmap[title].Total++
 			cardmap[title].EventIds = append(cardmap[title].EventIds, event.Id)
@@ -85,6 +90,10 @@ func (rt *Router) alertCurEventsCard(c *gin.Context) {
 				Title:    title,
 				Severity: event.Severity,
 			}
+		}
+
+		if cardmap[title].Severity < 1 {
+			cardmap[title].Severity = 3
 		}
 	}
 
@@ -142,10 +151,14 @@ func (rt *Router) alertCurEventsGetByRid(c *gin.Context) {
 // 列表方式，拉取活跃告警
 func (rt *Router) alertCurEventsList(c *gin.Context) {
 	stime, etime := getTimeRange(c)
-	severity := ginx.QueryInt(c, "severity", -1)
+	severity := strx.IdsInt64ForAPI(ginx.QueryStr(c, "severity", ""), ",")
 	query := ginx.QueryStr(c, "query", "")
 	limit := ginx.QueryInt(c, "limit", 20)
+	myGroups := ginx.QueryBool(c, "my_groups", false) // 是否只看自己组，默认false
+
 	dsIds := queryDatasourceIds(c)
+
+	eventIds := strx.IdsInt64ForAPI(ginx.QueryStr(c, "event_ids", ""), ",")
 
 	prod := ginx.QueryStr(c, "prods", "")
 	if prod == "" {
@@ -165,18 +178,19 @@ func (rt *Router) alertCurEventsList(c *gin.Context) {
 
 	ruleId := ginx.QueryInt64(c, "rid", 0)
 
-	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView)
+	bgids, err := GetBusinessGroupIds(c, rt.Ctx, rt.Center.EventHistoryGroupView, myGroups)
 	ginx.Dangerous(err)
 
 	total, err := models.AlertCurEventTotal(rt.Ctx, prods, bgids, stime, etime, severity, dsIds,
-		cates, ruleId, query)
+		cates, ruleId, query, eventIds)
 	ginx.Dangerous(err)
 
 	list, err := models.AlertCurEventsGet(rt.Ctx, prods, bgids, stime, etime, severity, dsIds,
-		cates, ruleId, query, limit, ginx.Offset(c, limit))
+		cates, ruleId, query, limit, ginx.Offset(c, limit), eventIds)
 	ginx.Dangerous(err)
 
 	cache := make(map[int64]*models.UserGroup)
+
 	for i := 0; i < len(list); i++ {
 		list[i].FillNotifyGroups(rt.Ctx, cache)
 	}
@@ -218,24 +232,68 @@ func (rt *Router) checkCurEventBusiGroupRWPermission(c *gin.Context, ids []int64
 
 func (rt *Router) alertCurEventGet(c *gin.Context) {
 	eid := ginx.UrlParamInt64(c, "eid")
-	event, err := models.AlertCurEventGetById(rt.Ctx, eid)
-	ginx.Dangerous(err)
+	event, err := GetCurEventDetail(rt.Ctx, eid)
 
-	if event == nil {
-		ginx.Bomb(404, "No such active event")
-	}
-
-	if !rt.Center.AnonymousAccess.AlertDetail && rt.Center.EventHistoryGroupView {
+	hasPermission := HasPermission(rt.Ctx, c, "event", fmt.Sprintf("%d", eid), rt.Center.AnonymousAccess.AlertDetail)
+	if !hasPermission {
+		rt.auth()(c)
+		rt.user()(c)
 		rt.bgroCheck(c, event.GroupId)
 	}
 
-	ruleConfig, needReset := models.FillRuleConfigTplName(rt.Ctx, event.RuleConfig)
+	ginx.NewRender(c).Data(event, err)
+}
+
+func GetCurEventDetail(ctx *ctx.Context, eid int64) (*models.AlertCurEvent, error) {
+	event, err := models.AlertCurEventGetById(ctx, eid)
+	if err != nil {
+		return nil, err
+	}
+
+	if event == nil {
+		return nil, fmt.Errorf("no such active event")
+	}
+
+	ruleConfig, needReset := models.FillRuleConfigTplName(ctx, event.RuleConfig)
 	if needReset {
 		event.RuleConfigJson = ruleConfig
 	}
 
 	event.LastEvalTime = event.TriggerTime
-	ginx.NewRender(c).Data(event, nil)
+	event.NotifyVersion, err = GetEventNotifyVersion(ctx, event.RuleId, event.NotifyRuleIds)
+	ginx.Dangerous(err)
+
+	event.NotifyRules, err = GetEventNorifyRuleNames(ctx, event.NotifyRuleIds)
+	return event, err
+}
+
+func GetEventNorifyRuleNames(ctx *ctx.Context, notifyRuleIds []int64) ([]*models.EventNotifyRule, error) {
+	notifyRuleNames := make([]*models.EventNotifyRule, 0)
+	notifyRules, err := models.NotifyRulesGet(ctx, "id in ?", notifyRuleIds)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, notifyRule := range notifyRules {
+		notifyRuleNames = append(notifyRuleNames, &models.EventNotifyRule{
+			Id:   notifyRule.ID,
+			Name: notifyRule.Name,
+		})
+	}
+	return notifyRuleNames, nil
+}
+
+func GetEventNotifyVersion(ctx *ctx.Context, ruleId int64, notifyRuleIds []int64) (int, error) {
+	if len(notifyRuleIds) != 0 {
+		// 如果存在 notify_rule_ids，则认为使用新的告警通知方式
+		return 1, nil
+	}
+
+	rule, err := models.AlertRuleGetById(ctx, ruleId)
+	if err != nil {
+		return 0, err
+	}
+	return rule.NotifyVersion, nil
 }
 
 func (rt *Router) alertCurEventsStatistics(c *gin.Context) {

@@ -107,12 +107,6 @@ insert into `role_operation`(role_name, operation) values('Standard', '/help/mig
 insert into `role_operation`(role_name, operation) values('Standard', '/alert-rules-built-in');
 insert into `role_operation`(role_name, operation) values('Standard', '/dashboards-built-in');
 insert into `role_operation`(role_name, operation) values('Standard', '/trace/dependencies');
-
-insert into `role_operation`(role_name, operation) values('Admin', '/help/source');
-insert into `role_operation`(role_name, operation) values('Admin', '/help/sso');
-insert into `role_operation`(role_name, operation) values('Admin', '/help/notification-tpls');
-insert into `role_operation`(role_name, operation) values('Admin', '/help/notification-settings');
-
 insert into `role_operation`(role_name, operation) values('Standard', '/users');
 insert into `role_operation`(role_name, operation) values('Standard', '/user-groups');
 insert into `role_operation`(role_name, operation) values('Standard', '/user-groups/add');
@@ -471,6 +465,7 @@ CREATE TABLE `alert_cur_event` (
     `rule_config` text not null comment 'annotations',
     `tags` varchar(1024) not null default '' comment 'merge data_tags rule_tags, split by ,,',
     `original_tags` text comment 'labels key=val,,k2=v2',
+    `notify_rule_ids` text COMMENT 'notify rule ids',
     PRIMARY KEY (`id`),
     KEY (`hash`),
     KEY (`rule_id`),
@@ -513,6 +508,7 @@ CREATE TABLE `alert_his_event` (
     `original_tags` text comment 'labels key=val,,k2=v2',
     `annotations` text not null comment 'annotations',
     `rule_config` text not null comment 'annotations',
+    `notify_rule_ids` text COMMENT 'notify rule ids',
     PRIMARY KEY (`id`),
     INDEX `idx_last_eval_time` (`last_eval_time`),
     KEY (`hash`),
@@ -537,7 +533,7 @@ CREATE TABLE `builtin_components` (
   `updated_by` varchar(191) NOT NULL DEFAULT '' COMMENT '''updater''',
   `disabled` int NOT NULL DEFAULT 0 COMMENT '''is disabled or not''',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `idx_ident` (`ident`)
+  KEY (`ident`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE `builtin_payloads` (
@@ -645,6 +641,7 @@ CREATE TABLE `datasource`
 (
     `id` int unsigned NOT NULL AUTO_INCREMENT,
     `name` varchar(191) not null default '',
+    `identifier` varchar(255) not null default '',
     `description` varchar(255) not null default '',
     `category` varchar(255) not null default '',
     `plugin_id` int unsigned not null default 0,
@@ -701,6 +698,7 @@ CREATE TABLE `es_index_pattern` (
     `allow_hide_system_indices` tinyint(1) not null default 0,
     `fields_format` varchar(4096) not null default '',
     `cross_cluster_enabled` int not null default 0,
+    `note` varchar(1024) not null default '',
     `create_at` bigint default '0',
     `create_by` varchar(64) default '',
     `update_at` bigint default '0',
@@ -791,6 +789,7 @@ CREATE TABLE `notify_rule` (
     `enable` tinyint(1) not null default 0,
     `user_group_ids` varchar(255) not null default '',
     `notify_configs` text,
+    `pipeline_configs` text,
     `create_at` bigint not null default 0,
     `create_by` varchar(64) not null default '',
     `update_at` bigint not null default 0,
@@ -830,6 +829,35 @@ CREATE TABLE `message_template` (
     `update_by` varchar(64) not null default '',
     PRIMARY KEY (`id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+CREATE TABLE `event_pipeline` (
+    `id` bigint unsigned not null auto_increment,
+    `name` varchar(128) not null,
+    `team_ids` text,
+    `description` varchar(255) not null default '',
+    `filter_enable` tinyint(1) not null default 0,
+    `label_filters` text,
+    `attribute_filters` text,
+    `processors` text,
+    `create_at` bigint not null default 0,
+    `create_by` varchar(64) not null default '',
+    `update_at` bigint not null default 0,
+    `update_by` varchar(64) not null default '',
+    PRIMARY KEY (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+CREATE TABLE `embedded_product` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `name` varchar(255) DEFAULT NULL,
+    `url` varchar(255) DEFAULT NULL,
+    `is_private` boolean DEFAULT NULL,
+    `team_ids` varchar(255),
+    `create_at` bigint not null default 0,
+    `create_by` varchar(64) not null default '',
+    `update_at` bigint not null default 0,
+    `update_by` varchar(64) not null default '',
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE `task_meta`
 (
@@ -2188,3 +2216,15 @@ CREATE TABLE task_host_99
     PRIMARY KEY (`ii`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4;
+
+CREATE TABLE `source_token` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `source_type` varchar(64) NOT NULL DEFAULT '' COMMENT 'source type',
+    `source_id` varchar(255) NOT NULL DEFAULT '' COMMENT 'source identifier',
+    `token` varchar(255) NOT NULL DEFAULT '' COMMENT 'access token',
+    `expire_at` bigint NOT NULL DEFAULT 0 COMMENT 'expire timestamp',
+    `create_at` bigint NOT NULL DEFAULT 0 COMMENT 'create timestamp',
+    `create_by` varchar(64) NOT NULL DEFAULT '' COMMENT 'creator',
+    PRIMARY KEY (`id`),
+    KEY `idx_source_type_id_token` (`source_type`, `source_id`, `token`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

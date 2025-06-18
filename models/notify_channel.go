@@ -157,7 +157,7 @@ func (ncc *NotifyChannelConfig) SendScript(events []*AlertCurEvent, tpl map[stri
 		return "", "", fmt.Errorf("script or path is empty")
 	}
 
-	fpath := ".notify_scriptt"
+	fpath := ".notify_script_" + strconv.FormatInt(ncc.ID, 10)
 	if config.Path != "" {
 		fpath = config.Path
 	} else {
@@ -388,7 +388,10 @@ func (ncc *NotifyChannelConfig) SendFlashDuty(events []*AlertCurEvent, flashDuty
 
 	// 设置 URL 参数
 	query := req.URL.Query()
-	query.Add("channel_id", strconv.FormatInt(flashDutyChannelID, 10))
+	if flashDutyChannelID != 0 {
+		// 如果 flashduty 有配置协作空间(channel_id)，则传入 channel_id 参数
+		query.Add("channel_id", strconv.FormatInt(flashDutyChannelID, 10))
+	}
 	req.URL.RawQuery = query.Encode()
 	req.Header.Add("Content-Type", "application/json")
 
@@ -800,6 +803,7 @@ func (ncc *NotifyChannelConfig) SendEmailNow(events []*AlertCurEvent, tpl map[st
 	s, err := d.Dial()
 	if err != nil {
 		logger.Errorf("email_sender: failed to dial: %s", err)
+		return err
 	}
 
 	m := gomail.NewMessage()
@@ -1232,12 +1236,12 @@ var NotiChMap = []*NotifyChannelConfig{
 		Name: "Telegram", Ident: Telegram, RequestType: "http", Weight: 7, Enable: true,
 		RequestConfig: &RequestConfig{
 			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:     "https://api.telegram.org/bot{{$params.token}}/sendMessage",
-				Method:  "POST",
+				URL:    "https://api.telegram.org/bot{{$params.token}}/sendMessage",
+				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
 				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
 				Request: RequestDetail{
 					Parameters: map[string]string{"chat_id": "{{$params.chat_id}}"},
-					Body:       `{"parse_mode": "markdown", "text": "{{$tpl.content}}"}`,
+					Body:       `{"text":"{{$tpl.content}}","parse_mode": "HTML"}`,
 				},
 			},
 		},

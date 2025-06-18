@@ -47,12 +47,27 @@ func (rt *Router) userGets(c *gin.Context) {
 	query := ginx.QueryStr(c, "query", "")
 	order := ginx.QueryStr(c, "order", "username")
 	desc := ginx.QueryBool(c, "desc", false)
+	usernames := strings.Split(ginx.QueryStr(c, "usernames", ""), ",")
+	phones := strings.Split(ginx.QueryStr(c, "phones", ""), ",")
+	emails := strings.Split(ginx.QueryStr(c, "emails", ""), ",")
+
+	if len(usernames) == 1 && usernames[0] == "" {
+		usernames = []string{}
+	}
+
+	if len(phones) == 1 && phones[0] == "" {
+		phones = []string{}
+	}
+
+	if len(emails) == 1 && emails[0] == "" {
+		emails = []string{}
+	}
 
 	go rt.UserCache.UpdateUsersLastActiveTime()
 	total, err := models.UserTotal(rt.Ctx, query, stime, etime)
 	ginx.Dangerous(err)
 
-	list, err := models.UserGets(rt.Ctx, query, limit, ginx.Offset(c, limit), stime, etime, order, desc)
+	list, err := models.UserGets(rt.Ctx, query, limit, ginx.Offset(c, limit), stime, etime, order, desc, usernames, phones, emails)
 	ginx.Dangerous(err)
 
 	user := c.MustGet("user").(*models.User)
@@ -219,4 +234,21 @@ func (rt *Router) userDel(c *gin.Context) {
 	}
 
 	ginx.NewRender(c).Message(target.Del(rt.Ctx))
+}
+
+func (rt *Router) installDateGet(c *gin.Context) {
+	rootUser, err := models.UserGetByUsername(rt.Ctx, "root")
+	if err != nil {
+		logger.Errorf("get root user failed: %v", err)
+		ginx.NewRender(c).Data(0, nil)
+		return
+	}
+
+	if rootUser == nil {
+		logger.Errorf("root user not found")
+		ginx.NewRender(c).Data(0, nil)
+		return
+	}
+
+	ginx.NewRender(c).Data(rootUser.CreateAt, nil)
 }

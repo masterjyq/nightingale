@@ -93,10 +93,9 @@ func stat() gin.HandlerFunc {
 
 		code := fmt.Sprintf("%d", c.Writer.Status())
 		method := c.Request.Method
-		labels := []string{cstats.Service, code, c.FullPath(), method}
+		labels := []string{code, c.FullPath(), method}
 
-		cstats.RequestCounter.WithLabelValues(labels...).Inc()
-		cstats.RequestDuration.WithLabelValues(labels...).Observe(float64(time.Since(start).Seconds()))
+		cstats.RequestDuration.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
 	}
 }
 
@@ -255,6 +254,7 @@ func (rt *Router) Config(r *gin.Engine) {
 
 		pages.GET("/notify-channels", rt.notifyChannelsGets)
 		pages.GET("/contact-keys", rt.contactKeysGets)
+		pages.GET("/install-date", rt.installDateGet)
 
 		pages.GET("/self/perms", rt.auth(), rt.user(), rt.permsGets)
 		pages.GET("/self/profile", rt.auth(), rt.user(), rt.selfProfileGet)
@@ -265,11 +265,11 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.DELETE("/self/token/:id", rt.auth(), rt.user(), rt.deleteToken)
 
 		pages.GET("/users", rt.auth(), rt.user(), rt.perm("/users"), rt.userGets)
-		pages.POST("/users", rt.auth(), rt.admin(), rt.userAddPost)
+		pages.POST("/users", rt.auth(), rt.user(), rt.perm("/users/add"), rt.userAddPost)
 		pages.GET("/user/:id/profile", rt.auth(), rt.userProfileGet)
-		pages.PUT("/user/:id/profile", rt.auth(), rt.admin(), rt.userProfilePut)
-		pages.PUT("/user/:id/password", rt.auth(), rt.admin(), rt.userPasswordPut)
-		pages.DELETE("/user/:id", rt.auth(), rt.admin(), rt.userDel)
+		pages.PUT("/user/:id/profile", rt.auth(), rt.user(), rt.perm("/users/put"), rt.userProfilePut)
+		pages.PUT("/user/:id/password", rt.auth(), rt.user(), rt.perm("/users/put"), rt.userPasswordPut)
+		pages.DELETE("/user/:id", rt.auth(), rt.user(), rt.perm("/users/del"), rt.userDel)
 
 		pages.GET("/metric-views", rt.auth(), rt.metricViewGets)
 		pages.DELETE("/metric-views", rt.auth(), rt.user(), rt.metricViewDel)
@@ -373,6 +373,8 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.POST("/relabel-test", rt.auth(), rt.user(), rt.relabelTest)
 		pages.POST("/busi-group/:id/alert-rules/clone", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.bgrw(), rt.cloneToMachine)
 		pages.POST("/busi-groups/alert-rules/clones", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.batchAlertRuleClone)
+		pages.POST("/busi-group/alert-rules/notify-tryrun", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.alertRuleNotifyTryRun)
+		pages.POST("/busi-group/alert-rules/enable-tryrun", rt.auth(), rt.user(), rt.perm("/alert-rules/add"), rt.alertRuleEnableTryRun)
 
 		pages.GET("/busi-groups/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGetsByGids)
 		pages.GET("/busi-group/:id/recording-rules", rt.auth(), rt.user(), rt.perm("/recording-rules"), rt.recordingRuleGets)
@@ -390,6 +392,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/busi-group/:id/alert-mute/:amid", rt.auth(), rt.user(), rt.perm("/alert-mutes/put"), rt.alertMutePutByFE)
 		pages.GET("/busi-group/:id/alert-mute/:amid", rt.auth(), rt.user(), rt.perm("/alert-mutes"), rt.alertMuteGet)
 		pages.PUT("/busi-group/:id/alert-mutes/fields", rt.auth(), rt.user(), rt.perm("/alert-mutes/put"), rt.bgrw(), rt.alertMutePutFields)
+		pages.POST("/alert-mute-tryrun", rt.auth(), rt.user(), rt.perm("/alert-mutes/add"), rt.alertMuteTryRun)
 
 		pages.GET("/busi-groups/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes"), rt.alertSubscribeGetsByGids)
 		pages.GET("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes"), rt.bgro(), rt.alertSubscribeGets)
@@ -397,22 +400,18 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.POST("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes/add"), rt.bgrw(), rt.alertSubscribeAdd)
 		pages.PUT("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes/put"), rt.bgrw(), rt.alertSubscribePut)
 		pages.DELETE("/busi-group/:id/alert-subscribes", rt.auth(), rt.user(), rt.perm("/alert-subscribes/del"), rt.bgrw(), rt.alertSubscribeDel)
+		pages.POST("/alert-subscribe/alert-subscribes-tryrun", rt.auth(), rt.user(), rt.perm("/alert-subscribes/add"), rt.alertSubscribeTryRun)
 
-		if rt.Center.AnonymousAccess.AlertDetail {
-			pages.GET("/alert-cur-event/:eid", rt.alertCurEventGet)
-			pages.GET("/alert-his-event/:eid", rt.alertHisEventGet)
-			pages.GET("/event-notify-records/:eid", rt.notificationRecordList)
-		} else {
-			pages.GET("/alert-cur-event/:eid", rt.auth(), rt.user(), rt.alertCurEventGet)
-			pages.GET("/alert-his-event/:eid", rt.auth(), rt.user(), rt.alertHisEventGet)
-			pages.GET("/event-notify-records/:eid", rt.auth(), rt.user(), rt.notificationRecordList)
-		}
+		pages.GET("/alert-cur-event/:eid", rt.alertCurEventGet)
+		pages.GET("/alert-his-event/:eid", rt.alertHisEventGet)
+		pages.GET("/event-notify-records/:eid", rt.notificationRecordList)
 
 		// card logic
 		pages.GET("/alert-cur-events/list", rt.auth(), rt.user(), rt.alertCurEventsList)
 		pages.GET("/alert-cur-events/card", rt.auth(), rt.user(), rt.alertCurEventsCard)
 		pages.POST("/alert-cur-events/card/details", rt.auth(), rt.alertCurEventsCardDetails)
 		pages.GET("/alert-his-events/list", rt.auth(), rt.user(), rt.alertHisEventsList)
+		pages.DELETE("/alert-his-events", rt.auth(), rt.admin(), rt.alertHisEventsDelete)
 		pages.DELETE("/alert-cur-events", rt.auth(), rt.user(), rt.perm("/alert-cur-events/del"), rt.alertCurEventDel)
 		pages.GET("/alert-cur-events/stats", rt.auth(), rt.alertCurEventsStatistics)
 
@@ -444,13 +443,13 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.POST("/datasource/status/update", rt.auth(), rt.admin(), rt.datasourceUpdataStatus)
 		pages.DELETE("/datasource/", rt.auth(), rt.admin(), rt.datasourceDel)
 
-		pages.GET("/roles", rt.auth(), rt.admin(), rt.roleGets)
-		pages.POST("/roles", rt.auth(), rt.admin(), rt.roleAdd)
-		pages.PUT("/roles", rt.auth(), rt.admin(), rt.rolePut)
-		pages.DELETE("/role/:id", rt.auth(), rt.admin(), rt.roleDel)
+		pages.GET("/roles", rt.auth(), rt.user(), rt.perm("/roles"), rt.roleGets)
+		pages.POST("/roles", rt.auth(), rt.user(), rt.perm("/roles/add"), rt.roleAdd)
+		pages.PUT("/roles", rt.auth(), rt.user(), rt.perm("/roles/put"), rt.rolePut)
+		pages.DELETE("/role/:id", rt.auth(), rt.user(), rt.perm("/roles/del"), rt.roleDel)
 
-		pages.GET("/role/:id/ops", rt.auth(), rt.admin(), rt.operationOfRole)
-		pages.PUT("/role/:id/ops", rt.auth(), rt.admin(), rt.roleBindOperation)
+		pages.GET("/role/:id/ops", rt.auth(), rt.user(), rt.perm("/roles"), rt.operationOfRole)
+		pages.PUT("/role/:id/ops", rt.auth(), rt.user(), rt.perm("/roles/put"), rt.roleBindOperation)
 		pages.GET("/operation", rt.operations)
 
 		pages.GET("/notify-tpls", rt.auth(), rt.user(), rt.notifyTplGets)
@@ -472,7 +471,7 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/notify-channel", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyChannelGets)
 		pages.PUT("/notify-channel", rt.auth(), rt.admin(), rt.notifyChannelPuts)
 
-		pages.GET("/notify-contact", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyContactGets)
+		pages.GET("/notify-contact", rt.auth(), rt.user(), rt.notifyContactGets)
 		pages.PUT("/notify-contact", rt.auth(), rt.admin(), rt.notifyContactPuts)
 
 		pages.GET("/notify-config", rt.auth(), rt.user(), rt.perm("/help/notification-settings"), rt.notifyConfigGet)
@@ -481,12 +480,19 @@ func (rt *Router) Config(r *gin.Engine) {
 
 		pages.GET("/es-index-pattern", rt.auth(), rt.esIndexPatternGet)
 		pages.GET("/es-index-pattern-list", rt.auth(), rt.esIndexPatternGetList)
-		pages.POST("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternAdd)
-		pages.PUT("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternPut)
-		pages.DELETE("/es-index-pattern", rt.auth(), rt.admin(), rt.esIndexPatternDel)
+		pages.POST("/es-index-pattern", rt.auth(), rt.user(), rt.perm("/log/index-patterns/add"), rt.esIndexPatternAdd)
+		pages.PUT("/es-index-pattern", rt.auth(), rt.user(), rt.perm("/log/index-patterns/put"), rt.esIndexPatternPut)
+		pages.DELETE("/es-index-pattern", rt.auth(), rt.user(), rt.perm("/log/index-patterns/del"), rt.esIndexPatternDel)
 
 		pages.GET("/embedded-dashboards", rt.auth(), rt.user(), rt.perm("/embedded-dashboards"), rt.embeddedDashboardsGet)
 		pages.PUT("/embedded-dashboards", rt.auth(), rt.user(), rt.perm("/embedded-dashboards/put"), rt.embeddedDashboardsPut)
+
+		// 获取 embedded-product 列表
+		pages.GET("/embedded-product", rt.auth(), rt.user(), rt.embeddedProductGets)
+		pages.GET("/embedded-product/:id", rt.auth(), rt.user(), rt.embeddedProductGet)
+		pages.POST("/embedded-product", rt.auth(), rt.user(), rt.perm("/embedded-product/add"), rt.embeddedProductAdd)
+		pages.PUT("/embedded-product/:id", rt.auth(), rt.user(), rt.perm("/embedded-product/put"), rt.embeddedProductPut)
+		pages.DELETE("/embedded-product/:id", rt.auth(), rt.user(), rt.perm("/embedded-product/delete"), rt.embeddedProductDelete)
 
 		pages.GET("/user-variable-configs", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigGets)
 		pages.POST("/user-variable-config", rt.auth(), rt.user(), rt.perm("/help/variable-configs"), rt.userVariableConfigAdd)
@@ -497,20 +503,23 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.PUT("/config", rt.auth(), rt.admin(), rt.configPutByKey)
 		pages.GET("/site-info", rt.siteInfo)
 
+		// source token 相关路由
+		pages.POST("/source-token", rt.auth(), rt.user(), rt.sourceTokenAdd)
+
 		// for admin api
 		pages.GET("/user/busi-groups", rt.auth(), rt.admin(), rt.userBusiGroupsGets)
 
 		pages.GET("/builtin-components", rt.auth(), rt.user(), rt.builtinComponentsGets)
-		pages.POST("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/add"), rt.builtinComponentsAdd)
-		pages.PUT("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/put"), rt.builtinComponentsPut)
-		pages.DELETE("/builtin-components", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinComponentsDel)
+		pages.POST("/builtin-components", rt.auth(), rt.user(), rt.perm("/components/add"), rt.builtinComponentsAdd)
+		pages.PUT("/builtin-components", rt.auth(), rt.user(), rt.perm("/components/put"), rt.builtinComponentsPut)
+		pages.DELETE("/builtin-components", rt.auth(), rt.user(), rt.perm("/components/del"), rt.builtinComponentsDel)
 
 		pages.GET("/builtin-payloads", rt.auth(), rt.user(), rt.builtinPayloadsGets)
 		pages.GET("/builtin-payloads/cates", rt.auth(), rt.user(), rt.builtinPayloadcatesGet)
-		pages.POST("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/add"), rt.builtinPayloadsAdd)
-		pages.GET("/builtin-payload/:id", rt.auth(), rt.user(), rt.perm("/built-in-components"), rt.builtinPayloadGet)
-		pages.PUT("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/put"), rt.builtinPayloadsPut)
-		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/built-in-components/del"), rt.builtinPayloadsDel)
+		pages.POST("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/components/add"), rt.builtinPayloadsAdd)
+		pages.GET("/builtin-payload/:id", rt.auth(), rt.user(), rt.perm("/components"), rt.builtinPayloadGet)
+		pages.PUT("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/components/put"), rt.builtinPayloadsPut)
+		pages.DELETE("/builtin-payloads", rt.auth(), rt.user(), rt.perm("/components/del"), rt.builtinPayloadsDel)
 		pages.GET("/builtin-payload", rt.auth(), rt.user(), rt.builtinPayloadsGetByUUIDOrID)
 
 		pages.POST("/message-templates", rt.auth(), rt.user(), rt.perm("/notification-templates/add"), rt.messageTemplatesAdd)
@@ -527,6 +536,16 @@ func (rt *Router) Config(r *gin.Engine) {
 		pages.GET("/notify-rules", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyRulesGet)
 		pages.POST("/notify-rule/test", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyTest)
 		pages.GET("/notify-rule/custom-params", rt.auth(), rt.user(), rt.perm("/notification-rules"), rt.notifyRuleCustomParamsGet)
+		pages.POST("/notify-rule/event-pipelines-tryrun", rt.auth(), rt.user(), rt.perm("/notification-rules/add"), rt.tryRunEventProcessorByNotifyRule)
+
+		// 事件Pipeline相关路由
+		pages.GET("/event-pipelines", rt.auth(), rt.user(), rt.perm("/event-pipelines"), rt.eventPipelinesList)
+		pages.POST("/event-pipeline", rt.auth(), rt.user(), rt.perm("/event-pipelines/add"), rt.addEventPipeline)
+		pages.PUT("/event-pipeline", rt.auth(), rt.user(), rt.perm("/event-pipelines/put"), rt.updateEventPipeline)
+		pages.GET("/event-pipeline/:id", rt.auth(), rt.user(), rt.perm("/event-pipelines"), rt.getEventPipeline)
+		pages.DELETE("/event-pipelines", rt.auth(), rt.user(), rt.perm("/event-pipelines/del"), rt.deleteEventPipelines)
+		pages.POST("/event-pipeline-tryrun", rt.auth(), rt.user(), rt.perm("/event-pipelines"), rt.tryRunEventPipeline)
+		pages.POST("/event-processor-tryrun", rt.auth(), rt.user(), rt.perm("/event-pipelines"), rt.tryRunEventProcessor)
 
 		pages.POST("/notify-channel-configs", rt.auth(), rt.user(), rt.perm("/notification-channels/add"), rt.notifyChannelsAdd)
 		pages.DELETE("/notify-channel-configs", rt.auth(), rt.user(), rt.perm("/notification-channels/del"), rt.notifyChannelsDel)
@@ -647,6 +666,7 @@ func (rt *Router) Config(r *gin.Engine) {
 
 			service.GET("/message-templates", rt.messageTemplateGets)
 
+			service.GET("/event-pipelines", rt.eventPipelinesListByService)
 		}
 	}
 

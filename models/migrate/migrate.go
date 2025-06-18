@@ -67,7 +67,8 @@ func MigrateTables(db *gorm.DB) error {
 		&TaskRecord{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}, &NotifyTpl{},
 		&Board{}, &BoardBusigroup{}, &Users{}, &SsoConfig{}, &models.BuiltinMetric{},
 		&models.MetricFilter{}, &models.NotificaitonRecord{}, &models.TargetBusiGroup{},
-		&models.UserToken{}, &models.DashAnnotation{}, MessageTemplate{}, NotifyRule{}, NotifyChannelConfig{}, &EsIndexPatternMigrate{}}
+		&models.UserToken{}, &models.DashAnnotation{}, MessageTemplate{}, NotifyRule{}, NotifyChannelConfig{}, &EsIndexPatternMigrate{},
+		&models.EventPipeline{}, &models.EmbeddedProduct{}, &models.SourceToken{}}
 
 	if isPostgres(db) {
 		dts = append(dts, &models.PostgresBuiltinComponent{})
@@ -79,24 +80,20 @@ func MigrateTables(db *gorm.DB) error {
 		dts = append(dts, &imodels.TaskSchedulerHealth{})
 	}
 
-	if !columnHasIndex(db, &AlertHisEvent{}, "original_tags") ||
-		!columnHasIndex(db, &AlertCurEvent{}, "original_tags") {
-		asyncDts := []interface{}{&AlertHisEvent{}, &AlertCurEvent{}}
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Errorf("panic to migrate table: %v", r)
-				}
-			}()
-
-			for _, dt := range asyncDts {
-				if err := db.AutoMigrate(dt); err != nil {
-					logger.Errorf("failed to migrate table %+v err:%v", dt, err)
-				}
+	asyncDts := []interface{}{&AlertHisEvent{}, &AlertCurEvent{}}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("panic to migrate table: %v", r)
 			}
 		}()
-	}
+
+		for _, dt := range asyncDts {
+			if err := db.AutoMigrate(dt); err != nil {
+				logger.Errorf("failed to migrate table %+v err:%v", dt, err)
+			}
+		}
+	}()
 
 	if !db.Migrator().HasTable(&models.BuiltinPayload{}) {
 		dts = append(dts, &models.BuiltinPayload{})
@@ -178,11 +175,6 @@ func InsertPermPoints(db *gorm.DB) {
 	})
 
 	ops = append(ops, models.RoleOperation{
-		RoleName:  "Admin",
-		Operation: "/permissions",
-	})
-
-	ops = append(ops, models.RoleOperation{
 		RoleName:  "Standard",
 		Operation: "/ibex-settings",
 	})
@@ -227,12 +219,31 @@ func InsertPermPoints(db *gorm.DB) {
 		Operation: "/notification-rules/del",
 	})
 
+	ops = append(ops, models.RoleOperation{
+		RoleName:  "Standard",
+		Operation: "/event-pipelines",
+	})
+
+	ops = append(ops, models.RoleOperation{
+		RoleName:  "Standard",
+		Operation: "/event-pipelines/add",
+	})
+
+	ops = append(ops, models.RoleOperation{
+		RoleName:  "Standard",
+		Operation: "/event-pipelines/put",
+	})
+
+	ops = append(ops, models.RoleOperation{
+		RoleName:  "Standard",
+		Operation: "/event-pipelines/del",
+	})
+
 	for _, op := range ops {
 		var count int64
 
-		err := db.Model(&models.RoleOperation{}).
-			Where("operation = ? AND role_name = ?", op.Operation, op.RoleName).
-			Count(&count).Error
+		session := db.Session(&gorm.Session{}).Model(&models.RoleOperation{})
+		err := session.Where("operation = ? AND role_name = ?", op.Operation, op.RoleName).Count(&count).Error
 
 		if err != nil {
 			logger.Errorf("check role operation exists failed, %v", err)
@@ -243,7 +254,7 @@ func InsertPermPoints(db *gorm.DB) {
 			continue
 		}
 
-		err = db.Model(&models.RoleOperation{}).Create(&op).Error
+		err = session.Create(&op).Error
 		if err != nil {
 			logger.Errorf("insert role operation failed, %v", err)
 		}
@@ -291,12 +302,14 @@ type TaskRecord struct {
 	EventId int64 `gorm:"column:event_id;bigint(20);not null;default:0;comment:event id;index:idx_event_id"`
 }
 type AlertHisEvent struct {
-	LastEvalTime int64  `gorm:"column:last_eval_time;bigint(20);not null;default:0;comment:for time filter;index:idx_last_eval_time"`
-	OriginalTags string `gorm:"column:original_tags;type:text;comment:labels key=val,,k2=v2"`
+	LastEvalTime  int64   `gorm:"column:last_eval_time;bigint(20);not null;default:0;comment:for time filter;index:idx_last_eval_time"`
+	OriginalTags  string  `gorm:"column:original_tags;type:text;comment:labels key=val,,k2=v2"`
+	NotifyRuleIds []int64 `gorm:"column:notify_rule_ids;type:text;serializer:json;comment:notify rule ids"`
 }
 
 type AlertCurEvent struct {
-	OriginalTags string `gorm:"column:original_tags;type:text;comment:labels key=val,,k2=v2"`
+	OriginalTags  string  `gorm:"column:original_tags;type:text;comment:labels key=val,,k2=v2"`
+	NotifyRuleIds []int64 `gorm:"column:notify_rule_ids;type:text;serializer:json;comment:notify rule ids"`
 }
 
 type Target struct {
@@ -308,7 +321,8 @@ type Target struct {
 }
 
 type Datasource struct {
-	IsDefault bool `gorm:"column:is_default;type:boolean;comment:is default datasource"`
+	IsDefault  bool   `gorm:"column:is_default;type:boolean;comment:is default datasource"`
+	Identifier string `gorm:"column:identifier;type:varchar(255);default:'';comment:identifier"`
 }
 
 type Configs struct {
@@ -366,7 +380,8 @@ func (TaskHostDoing) TableName() string {
 }
 
 type EsIndexPatternMigrate struct {
-	CrossClusterEnabled int `gorm:"column:cross_cluster_enabled;type:int;default:0"`
+	CrossClusterEnabled int    `gorm:"column:cross_cluster_enabled;type:int;default:0"`
+	Note                string `gorm:"column:note;type:varchar(1024);default:''"`
 }
 
 func (EsIndexPatternMigrate) TableName() string {
@@ -412,16 +427,17 @@ func (t *MessageTemplate) TableName() string {
 }
 
 type NotifyRule struct {
-	ID            int64                 `gorm:"column:id;primaryKey;autoIncrement"`
-	Name          string                `gorm:"column:name;type:varchar(255);not null"`
-	Description   string                `gorm:"column:description;type:text"`
-	Enable        bool                  `gorm:"column:enable;not null;default:false"`
-	UserGroupIds  []int64               `gorm:"column:user_group_ids;type:varchar(255)"`
-	NotifyConfigs []models.NotifyConfig `gorm:"column:notify_configs;type:text"`
-	CreateAt      int64                 `gorm:"column:create_at;not null;default:0"`
-	CreateBy      string                `gorm:"column:create_by;type:varchar(64);not null;default:''"`
-	UpdateAt      int64                 `gorm:"column:update_at;not null;default:0"`
-	UpdateBy      string                `gorm:"column:update_by;type:varchar(64);not null;default:''"`
+	ID              int64                   `gorm:"column:id;primaryKey;autoIncrement"`
+	Name            string                  `gorm:"column:name;type:varchar(255);not null"`
+	Description     string                  `gorm:"column:description;type:text"`
+	Enable          bool                    `gorm:"column:enable;not null;default:false"`
+	UserGroupIds    []int64                 `gorm:"column:user_group_ids;type:varchar(255)"`
+	NotifyConfigs   []models.NotifyConfig   `gorm:"column:notify_configs;type:text"`
+	PipelineConfigs []models.PipelineConfig `gorm:"column:pipeline_configs;type:text"`
+	CreateAt        int64                   `gorm:"column:create_at;not null;default:0"`
+	CreateBy        string                  `gorm:"column:create_by;type:varchar(64);not null;default:''"`
+	UpdateAt        int64                   `gorm:"column:update_at;not null;default:0"`
+	UpdateBy        string                  `gorm:"column:update_by;type:varchar(64);not null;default:''"`
 }
 
 func (r *NotifyRule) TableName() string {

@@ -1,15 +1,16 @@
 package router
 
 import (
+	"strings"
 	"time"
 
 	"github.com/ccfos/nightingale/v6/alert/sender"
 	"github.com/ccfos/nightingale/v6/models"
+	"github.com/ccfos/nightingale/v6/pkg/strx"
 
 	"github.com/gin-gonic/gin"
 	"github.com/toolkits/pkg/ginx"
 	"github.com/toolkits/pkg/i18n"
-	"github.com/toolkits/pkg/str"
 )
 
 func (rt *Router) taskGets(c *gin.Context) {
@@ -40,7 +41,7 @@ func (rt *Router) taskGets(c *gin.Context) {
 }
 
 func (rt *Router) taskGetsByGids(c *gin.Context) {
-	gids := str.IdsInt64(ginx.QueryStr(c, "gids", ""), ",")
+	gids := strx.IdsInt64ForAPI(ginx.QueryStr(c, "gids", ""), ",")
 	if len(gids) > 0 {
 		for _, gid := range gids {
 			rt.bgroCheck(c, gid)
@@ -84,20 +85,6 @@ func (rt *Router) taskGetsByGids(c *gin.Context) {
 	}, nil)
 }
 
-type taskForm struct {
-	Title     string   `json:"title" binding:"required"`
-	Account   string   `json:"account" binding:"required"`
-	Batch     int      `json:"batch"`
-	Tolerance int      `json:"tolerance"`
-	Timeout   int      `json:"timeout"`
-	Pause     string   `json:"pause"`
-	Script    string   `json:"script" binding:"required"`
-	Args      string   `json:"args"`
-	Action    string   `json:"action" binding:"required"`
-	Creator   string   `json:"creator"`
-	Hosts     []string `json:"hosts" binding:"required"`
-}
-
 func (rt *Router) taskRecordAdd(c *gin.Context) {
 	var f *models.TaskRecord
 	ginx.BindJSON(c, &f)
@@ -112,6 +99,14 @@ func (rt *Router) taskAdd(c *gin.Context) {
 
 	var f models.TaskForm
 	ginx.BindJSON(c, &f)
+	// 把 f.Hosts 中的空字符串过滤掉
+	hosts := make([]string, 0, len(f.Hosts))
+	for i := range f.Hosts {
+		if strings.TrimSpace(f.Hosts[i]) != "" {
+			hosts = append(hosts, strings.TrimSpace(f.Hosts[i]))
+		}
+	}
+	f.Hosts = hosts
 
 	bgid := ginx.UrlParamInt64(c, "id")
 	user := c.MustGet("user").(*models.User)

@@ -10,10 +10,12 @@ import (
 
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/slice"
+	"github.com/ccfos/nightingale/v6/pkg/strx"
 	"github.com/ccfos/nightingale/v6/pkg/tplx"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/toolkits/pkg/ginx"
-	"github.com/toolkits/pkg/str"
 )
 
 func (rt *Router) messageTemplatesAdd(c *gin.Context) {
@@ -30,9 +32,12 @@ func (rt *Router) messageTemplatesAdd(c *gin.Context) {
 	ginx.Dangerous(err)
 	now := time.Now().Unix()
 	for _, tpl := range lst {
+		// 生成一个唯一的标识符，以后也不允许修改，前端不需要传这个参数
+		tpl.Ident = uuid.New().String()
+
 		ginx.Dangerous(tpl.Verify())
 		if !isAdmin && !slice.HaveIntersection(gids, tpl.UserGroupIds) {
-			ginx.Bomb(http.StatusForbidden, "no permission")
+			ginx.Bomb(http.StatusForbidden, "forbidden")
 		}
 		idents = append(idents, tpl.Ident)
 
@@ -75,8 +80,8 @@ func (rt *Router) messageTemplatesDel(c *gin.Context) {
 		gids, err := models.MyGroupIds(rt.Ctx, me.Id)
 		ginx.Dangerous(err)
 		for _, t := range lst {
-			if !slice.HaveIntersection[int64](gids, t.UserGroupIds) {
-				ginx.Bomb(http.StatusForbidden, "no permission")
+			if !slice.HaveIntersection(gids, t.UserGroupIds) {
+				ginx.Bomb(http.StatusForbidden, "forbidden")
 			}
 		}
 	}
@@ -105,8 +110,8 @@ func (rt *Router) messageTemplatePut(c *gin.Context) {
 	if !me.IsAdmin() {
 		gids, err := models.MyGroupIds(rt.Ctx, me.Id)
 		ginx.Dangerous(err)
-		if !slice.HaveIntersection[int64](gids, mt.UserGroupIds) {
-			ginx.Bomb(http.StatusForbidden, "no permission")
+		if !slice.HaveIntersection(gids, mt.UserGroupIds) {
+			ginx.Bomb(http.StatusForbidden, "forbidden")
 		}
 	}
 
@@ -125,8 +130,8 @@ func (rt *Router) messageTemplateGet(c *gin.Context) {
 	if mt == nil {
 		ginx.Bomb(http.StatusNotFound, "message template not found")
 	}
-	if mt.Private == 1 && !slice.HaveIntersection[int64](gids, mt.UserGroupIds) {
-		ginx.Bomb(http.StatusForbidden, "no permission")
+	if mt.Private == 1 && !slice.HaveIntersection(gids, mt.UserGroupIds) {
+		ginx.Bomb(http.StatusForbidden, "forbidden")
 	}
 
 	ginx.NewRender(c).Data(mt, nil)
@@ -137,7 +142,7 @@ func (rt *Router) messageTemplatesGet(c *gin.Context) {
 	if tmp := ginx.QueryStr(c, "notify_channel_idents", ""); tmp != "" {
 		notifyChannelIdents = strings.Split(tmp, ",")
 	}
-	notifyChannelIds := str.IdsInt64(ginx.QueryStr(c, "notify_channel_ids", ""))
+	notifyChannelIds := strx.IdsInt64ForAPI(ginx.QueryStr(c, "notify_channel_ids", ""))
 	if len(notifyChannelIds) > 0 {
 		ginx.Dangerous(models.DB(rt.Ctx).Model(models.NotifyChannelConfig{}).
 			Where("id in (?)", notifyChannelIds).Pluck("ident", &notifyChannelIdents).Error)

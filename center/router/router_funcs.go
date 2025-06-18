@@ -40,6 +40,10 @@ func (rt *Router) statistic(c *gin.Context) {
 		model = models.NotifyRule{}
 	case "notify_channel":
 		model = models.NotifyChannel{}
+	case "event_pipeline":
+		statistics, err = models.EventPipelineStatistics(rt.Ctx)
+		ginx.NewRender(c).Data(statistics, err)
+		return
 	case "datasource":
 		// datasource update_at is different from others
 		statistics, err = models.DatasourceStatistics(rt.Ctx)
@@ -168,4 +172,39 @@ func Username(c *gin.Context) string {
 		username = user.Username
 	}
 	return username
+}
+
+func HasPermission(ctx *ctx.Context, c *gin.Context, sourceType, sourceId string, isAnonymousAccess bool) bool {
+	if sourceType == "event" && isAnonymousAccess {
+		return true
+	}
+
+	// 尝试从请求中获取 __token 参数
+	token := ginx.QueryStr(c, "__token", "")
+
+	// 如果有 __token 参数，验证其合法性
+	if token != "" {
+		return ValidateSourceToken(ctx, sourceType, sourceId, token)
+	}
+
+	return false
+}
+
+func ValidateSourceToken(ctx *ctx.Context, sourceType, sourceId, token string) bool {
+	if token == "" {
+		return false
+	}
+
+	// 根据源类型、源ID和令牌获取源令牌记录
+	sourceToken, err := models.GetSourceTokenBySource(ctx, sourceType, sourceId, token)
+	if err != nil {
+		return false
+	}
+
+	// 检查令牌是否过期
+	if sourceToken.IsExpired() {
+		return false
+	}
+
+	return true
 }

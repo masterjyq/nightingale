@@ -222,3 +222,43 @@ ALTER TABLE `notification_record` ADD COLUMN `notify_rule_id` BIGINT NOT NULL DE
 /* v8.0.0-beta.9 2025-03-17 */
 ALTER TABLE `message_template` ADD COLUMN `weight` int not null default 0;
 ALTER TABLE `notify_channel` ADD COLUMN `weight` int not null default 0;
+
+/* v8.0.0-beta.11 2025-04-10 */
+ALTER TABLE `es_index_pattern` ADD COLUMN `note` varchar(1024) not null default '';
+ALTER TABLE `datasource` ADD COLUMN `identifier` varchar(255) not null default '';
+
+/* v8.0.0-beta.11 2025-05-15 */
+ALTER TABLE `notify_rule` ADD COLUMN `pipeline_configs` text;
+
+CREATE TABLE `event_pipeline` (
+    `id` bigint unsigned not null auto_increment,
+    `name` varchar(128) not null,
+    `team_ids` text,
+    `description` varchar(255) not null default '',
+    `filter_enable` tinyint(1) not null default 0,
+    `label_filters` text,
+    `attribute_filters` text,
+    `processors` text,
+    `create_at` bigint not null default 0,
+    `create_by` varchar(64) not null default '',
+    `update_at` bigint not null default 0,
+    `update_by` varchar(64) not null default '',
+    PRIMARY KEY (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+/* v8.0.0-next */
+CREATE TABLE `source_token` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `source_type` varchar(64) NOT NULL DEFAULT '' COMMENT 'source type',
+    `source_id` varchar(255) NOT NULL DEFAULT '' COMMENT 'source identifier',
+    `token` varchar(255) NOT NULL DEFAULT '' COMMENT 'access token',
+    `expire_at` bigint NOT NULL DEFAULT 0 COMMENT 'expire timestamp',
+    `create_at` bigint NOT NULL DEFAULT 0 COMMENT 'create timestamp',
+    `create_by` varchar(64) NOT NULL DEFAULT '' COMMENT 'creator',
+    PRIMARY KEY (`id`),
+    KEY `idx_source_type_id_token` (`source_type`, `source_id`, `token`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+/* v8.0.0-beta.12 2025-06-03 */
+ALTER TABLE `alert_his_event` ADD COLUMN `notify_rule_ids` text COMMENT 'notify rule ids';
+ALTER TABLE `alert_cur_event` ADD COLUMN `notify_rule_ids` text COMMENT 'notify rule ids';
